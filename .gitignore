@@ -1,0 +1,7 @@
+# Godot 4 local cache/import files
+.godot/
+*.translation
+
+# Export artifacts
+export.cfg
+export_presets.cfg
