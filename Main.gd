@@ -975,7 +975,10 @@ func _simulate(dt: float) -> void:
 
 	if time_elapsed >= next_spawn_at:
 		spawn_plane()
-		var tightness: float = max(0.0, 1.0 - time_elapsed / 180.0)
+		# Ramp over 5 minutes so rising traffic tracks the fleet getting heavier.
+		# At 3 minutes it peaked just before widebodies arrived, stacking two
+		# difficulty spikes on top of each other.
+		var tightness: float = max(0.0, 1.0 - time_elapsed / 300.0)
 		var min_gap := 3.0 + 3.0 * tightness
 		var max_gap := 6.0 + 4.0 * tightness
 		next_spawn_at = time_elapsed + min_gap + randf() * (max_gap - min_gap)
@@ -1108,6 +1111,13 @@ func _update_contract_ui() -> void:
 func _update_hud() -> void:
 	money_label.text = "Money: $%d" % money
 	rep_label.text = "Reputation: %d" % reputation
+	# Reputation is the lose condition, so make it shout before it runs out.
+	if reputation < 25:
+		rep_label.modulate = Color(1.0, 0.42, 0.38)
+	elif reputation < 50:
+		rep_label.modulate = Color(1.0, 0.78, 0.35)
+	else:
+		rep_label.modulate = Color.WHITE
 	var clock := "PAUSED" if paused else "%dx" % int(speed)
 	next_in_label.text = "Next flight in: %.1fs   [%s]" % [max(0.0, next_spawn_at - time_elapsed), clock]
 
@@ -1300,7 +1310,10 @@ func _draw_plane(p: Dictionary) -> void:
 			label += " (holding short)"
 	if p["blocked_timer"] > 1.0:
 		label += " !"
-	draw_string(ThemeDB.fallback_font, pos + Vector2(-22, -16), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 1))
+	# Skip the label while the aircraft is still flying in from off-map, or it
+	# renders as clipped text jammed against the left edge.
+	if pos.x > 28.0:
+		draw_string(ThemeDB.fallback_font, pos + Vector2(-22, -16), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 1))
 
 
 func _draw_ghost() -> void:
