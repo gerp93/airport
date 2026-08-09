@@ -2,6 +2,9 @@ extends Node2D
 
 const AirportGrid = preload("res://AirportGrid.gd")
 const Regions = preload("res://Regions.gd")
+const KvgUpdate = preload("res://addons/kvg_update/kvg_update.gd")
+
+const UPDATE_REPO := "gerp93/airport"
 
 enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, TERMINAL, ROAD, PARKING, DEMOLISH }
 
@@ -278,6 +281,34 @@ func _ready() -> void:
 		_style_button($UI/FacilityPanel.get_node("Row%dSell" % i))
 
 	add_log("Airport open. Build taxiways to connect runways and gates.")
+
+	# Headless/balance runs are deterministic test tooling, not a real play
+	# session — they shouldn't make a network call or depend on GitHub being up.
+	if not (_echo_log or _auto_sign):
+		_check_for_update()
+
+
+func _check_for_update() -> void:
+	var checker := KvgUpdate.new()
+	add_child(checker)
+	checker.check_complete.connect(_on_update_checked)
+	var current: String = ProjectSettings.get_setting("application/config/version", "0.0.0-dev")
+	checker.check(UPDATE_REPO, current)
+
+
+func _on_update_checked(result: Dictionary) -> void:
+	if result["error"] != "":
+		# Not user-facing: no releases yet, offline, GitHub hiccup — none of
+		# these are worth interrupting a game session over.
+		return
+	if not result["available"]:
+		return
+	var btn: Button = $UI/UpdateBtn
+	btn.text = "Update available: %s" % result["latest"]
+	btn.visible = true
+	btn.pressed.connect(func(): OS.shell_open(result["url"]))
+	_style_button(btn)
+	add_log("A new version (%s) is available — see the Update button." % result["latest"])
 
 
 # --- location setup ---

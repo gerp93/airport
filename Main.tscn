@@ -542,6 +542,15 @@ offset_bottom = 750.0
 focus_mode = 0
 text = "Load (F9)"
 
+[node name="UpdateBtn" type="Button" parent="UI"]
+visible = false
+offset_left = 1244.0
+offset_top = 756.0
+offset_right = 1430.0
+offset_bottom = 788.0
+focus_mode = 0
+text = "Update available"
+
 [node name="LogLabel" type="RichTextLabel" parent="UI"]
 offset_left = 10.0
 offset_top = 718.0

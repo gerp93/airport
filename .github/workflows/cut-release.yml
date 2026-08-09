@@ -1,0 +1,68 @@
+# Copied from KVG_Standards templates/cut-release.yml. Operator-facing entry
+# point — GitHub Actions requires `workflow_dispatch` to live in the repo whose
+# Actions tab you click "Run workflow" from, so this thin file can't be
+# centralized. Everything after tagging IS: it calls a reusable workflow in
+# KVG_Standards.
+#
+# Use this for the FIRST release, at 0.1.0 — auto-release.yml bumps from the
+# newest existing tag, so with no tags it would pick 0.0.1 rather than starting
+# where you want. After that auto-release takes over and stays pre-1.0 on its
+# own (see the note in that file).
+
+name: Cut Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. "0.1.0" or "v0.1.0"'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate and normalize version
+        id: version
+        run: |
+          set -e
+          RAW="${{ inputs.version }}"
+          VERSION="v${RAW#v}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: '$RAW' — expected X.Y.Z or vX.Y.Z (e.g. 0.1.0)." >&2
+            exit 1
+          fi
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists." >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          VERSION="${{ steps.version.outputs.version }}"
+          git tag -a "$VERSION" -m "$VERSION"
+          git push origin "$VERSION"
+
+  release:
+    needs: tag
+    uses: gerp93/KVG_Standards/.github/workflows/release-godot.yml@main
+    with:
+      version: ${{ needs.tag.outputs.version }}
+      app_name: Airport
+      godot_version: "4.7.1"
+    permissions:
+      contents: write

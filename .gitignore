@@ -2,6 +2,11 @@
 .godot/
 *.translation
 
-# Export artifacts
+# Local per-machine export output path overrides. export_presets.cfg itself IS
+# committed — CI cannot export without it, and this project's presets hold no
+# signing credentials. See KVG_Standards' game-repos.md.
 export.cfg
-export_presets.cfg
+
+# Built artifacts
+build/
+release_out/

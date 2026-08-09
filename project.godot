@@ -14,8 +14,12 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 [application]
 
-config/name="Airport Tycoon MVP"
+config/name="Airport Tycoon"
 run/main_scene="res://Main.tscn"
+; Stamped by KVG_Standards' release-godot.yml at build time from the release
+; tag. What is committed here is the dev placeholder, so an editor run will
+; usually report itself as behind the latest release — expected.
+config/version="0.0.0-dev"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 
 [display]
