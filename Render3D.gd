@@ -91,6 +91,8 @@ var _zoom := 1.0
 var _layout_dirty := true
 var _ghost_sig := ""
 var _panning := false
+var _orbiting := false
+var _hint: Label
 
 
 func _ready() -> void:
@@ -102,6 +104,20 @@ func _ready() -> void:
 	add_child(_plane_root)
 	_ghost_root = Node3D.new()
 	add_child(_ghost_root)
+	_build_hint()
+
+
+# Camera controls are invisible otherwise — there is nothing on screen to
+# suggest the view can move at all. Sits just above the build toolbar.
+func _build_hint() -> void:
+	var layer := CanvasLayer.new()
+	add_child(layer)
+	_hint = Label.new()
+	_hint.position = Vector2(12, 648)
+	_hint.add_theme_font_size_override("font_size", 12)
+	_hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.5))
+	_hint.text = "CAMERA — middle-drag pan · right-drag rotate · wheel zoom · arrows pan · , . rotate 45° · Home reset"
+	layer.add_child(_hint)
 
 
 func attach(g) -> void:
@@ -550,39 +566,73 @@ func set_ghost_runway(a: Vector2, b: Vector2, color: Color) -> void:
 
 # --- camera controls --------------------------------------------------------
 #
-# Deliberately on keys the build tools do not already claim: Main.gd binds
-# T/R/G/H/E/O/P/X to tools and 1/2/3, A, D, Space to the sim.
+# Mouse-first, because obscure keys are undiscoverable: drag with the middle or
+# right button, wheel to zoom. The keyboard fallbacks are deliberately on keys
+# the build tools do not already claim — Main.gd binds T/R/G/H/E/O/P/X to tools
+# and 1/2/3, A, D, Space to the sim, so Q/E and WASD are all unavailable.
+
+const ARROW_PAN_PX := 90.0
+const ORBIT_SENSITIVITY := 0.35
+
+
+# Panning is done by measuring how far the ground moved under the cursor and
+# undoing exactly that. It needs no trigonometry and stays correct at any yaw,
+# pitch or zoom — the hand-rolled version this replaces was none of those.
+func _pan_by_screen(delta_px: Vector2) -> void:
+	var before := screen_to_world(Vector2.ZERO)
+	var after := screen_to_world(delta_px)
+	_pan += after - before
+	_apply_camera()
+
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
-		if mb.pressed and mb.button_index == MOUSE_BUTTON_WHEEL_UP:
-			_zoom = maxf(0.25, _zoom - 0.08)
-			_apply_camera()
-		elif mb.pressed and mb.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			_zoom = minf(2.5, _zoom + 0.08)
-			_apply_camera()
-		elif mb.button_index == MOUSE_BUTTON_MIDDLE or mb.button_index == MOUSE_BUTTON_RIGHT:
-			_panning = mb.pressed
+		match mb.button_index:
+			MOUSE_BUTTON_WHEEL_UP:
+				if mb.pressed:
+					_zoom = maxf(0.25, _zoom - 0.08)
+					_apply_camera()
+			MOUSE_BUTTON_WHEEL_DOWN:
+				if mb.pressed:
+					_zoom = minf(2.5, _zoom + 0.08)
+					_apply_camera()
+			MOUSE_BUTTON_MIDDLE:
+				_panning = mb.pressed
+			MOUSE_BUTTON_RIGHT:
+				_orbiting = mb.pressed
+				# Snap back to a clean isometric angle on release: free rotation
+				# feels good to drag but only the 45s actually look isometric.
+				if not mb.pressed:
+					_yaw_deg = roundf(_yaw_deg / 45.0) * 45.0
+					_apply_camera()
 
-	elif event is InputEventMouseMotion and _panning:
+	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
-		# Pan in screen space: rotate the drag back out of the camera yaw so the
-		# field follows the cursor whatever direction the view is facing.
-		var k: float = _cam.size / float(maxi(get_viewport().size.y, 1))
-		var d: Vector2 = -mm.relative * k
-		var yaw := deg_to_rad(_yaw_deg)
-		var flat := d.rotated(-yaw + PI * 0.5) * Vector2(1.0, 1.0 / sin(-deg_to_rad(ISO_PITCH_DEG)))
-		_pan += flat
-		_apply_camera()
+		if _panning:
+			var before := screen_to_world(mm.position - mm.relative)
+			var after := screen_to_world(mm.position)
+			_pan -= after - before
+			_apply_camera()
+		elif _orbiting:
+			_yaw_deg += mm.relative.x * ORBIT_SENSITIVITY
+			_apply_camera()
 
-	elif event is InputEventKey and event.pressed and not event.echo:
+	elif event is InputEventKey and event.pressed:
 		match (event as InputEventKey).keycode:
-			KEY_BRACKETLEFT:
+			KEY_BRACKETLEFT, KEY_COMMA:
 				_yaw_deg += 45.0
 				_apply_camera()
-			KEY_BRACKETRIGHT:
+			KEY_BRACKETRIGHT, KEY_PERIOD:
 				_yaw_deg -= 45.0
 				_apply_camera()
 			KEY_HOME:
 				reset_camera()
+			KEY_LEFT:
+				_pan_by_screen(Vector2(-ARROW_PAN_PX, 0.0))
+			KEY_RIGHT:
+				_pan_by_screen(Vector2(ARROW_PAN_PX, 0.0))
+			KEY_UP:
+				_pan_by_screen(Vector2(0.0, -ARROW_PAN_PX))
+			KEY_DOWN:
+				_pan_by_screen(Vector2(0.0, ARROW_PAN_PX))
