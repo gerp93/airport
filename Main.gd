@@ -3,16 +3,17 @@ extends Node2D
 const AirportGrid = preload("res://AirportGrid.gd")
 const Regions = preload("res://Regions.gd")
 
-enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, DEMOLISH }
+enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, TERMINAL, DEMOLISH }
 
 const TOOL_BUTTONS := {
 	Tool.SELECT: "SelectBtn", Tool.TAXIWAY: "TaxiwayBtn", Tool.RUNWAY: "RunwayBtn",
 	Tool.GATE_SMALL: "GateSmallBtn", Tool.GATE_LARGE: "GateLargeBtn",
-	Tool.DEMOLISH: "DemolishBtn",
+	Tool.TERMINAL: "TerminalBtn", Tool.DEMOLISH: "DemolishBtn",
 }
 const TOOL_KEYS := {
 	KEY_ESCAPE: Tool.SELECT, KEY_T: Tool.TAXIWAY, KEY_R: Tool.RUNWAY,
-	KEY_G: Tool.GATE_SMALL, KEY_H: Tool.GATE_LARGE, KEY_X: Tool.DEMOLISH,
+	KEY_G: Tool.GATE_SMALL, KEY_H: Tool.GATE_LARGE, KEY_E: Tool.TERMINAL,
+	KEY_X: Tool.DEMOLISH,
 }
 
 const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
@@ -91,15 +92,22 @@ const FACILITIES := [
 		"upkeep": 900, "per_unit": 2, "unit": "refuels",
 	},
 	{
-		"key": "term", "name": "Terminal Wing", "cost": 55_000_000,
-		"upkeep": 18_000, "per_unit": 6, "unit": "pax units",
-	},
-	{
 		"key": "mech", "name": "Maintenance Hangar", "cost": 22_000_000,
 		"upkeep": 7_500, "per_unit": 1, "unit": "checks",
 	},
 ]
-const START_FACILITIES := {"tower": 1, "crew": 1, "fuel": 1, "term": 1, "mech": 0}
+const START_FACILITIES := {"tower": 1, "crew": 1, "fuel": 1, "mech": 0}
+
+# Terminal capacity now comes from placed concourse tiles rather than an
+# abstract purchase, so passenger handling has to be laid out next to the
+# stands it serves. This is the most compressed capital figure in the model:
+# a real terminal runs into the hundreds of millions and would swamp
+# everything else at this revenue scale.
+const COST_TERMINAL_TILE := 18_000_000
+const UPKEEP_TERMINAL_TILE := 6_000
+const TERM_UNITS_PER_TILE := 3
+# A stand with no jet bridge still works, but everyone has to be bussed.
+const REMOTE_STAND_FACTOR := 1.4
 
 # A line check is worth servicing if you have the hangar for it, so maintenance
 # is an extra revenue stream rather than another way to be punished.
@@ -222,6 +230,7 @@ func _ready() -> void:
 	$UI/RunwayBtn.pressed.connect(_set_tool.bind(Tool.RUNWAY))
 	$UI/GateSmallBtn.pressed.connect(_set_tool.bind(Tool.GATE_SMALL))
 	$UI/GateLargeBtn.pressed.connect(_set_tool.bind(Tool.GATE_LARGE))
+	$UI/TerminalBtn.pressed.connect(_set_tool.bind(Tool.TERMINAL))
 	$UI/DemolishBtn.pressed.connect(_set_tool.bind(Tool.DEMOLISH))
 
 	$UI/PauseBtn.toggled.connect(_on_pause_toggled)
@@ -412,6 +421,8 @@ func fac_def(key: String) -> Dictionary:
 
 
 func capacity(key: String) -> int:
+	if key == "term":
+		return grid.terminal_tile_count() * TERM_UNITS_PER_TILE
 	return facilities.get(key, 0) * int(fac_def(key)["per_unit"])
 
 
@@ -424,6 +435,7 @@ func total_upkeep() -> int:
 	for f in FACILITIES:
 		total += int(facilities.get(f["key"], 0)) * int(f["upkeep"])
 	total += grid.runways.size() * UPKEEP_RUNWAY
+	total += grid.terminal_tile_count() * UPKEEP_TERMINAL_TILE
 	total += grid.gates.size() * UPKEEP_STAND
 	return total
 
@@ -1246,6 +1258,11 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				p["state"] = "AT_GATE"
 				p["state_timer"] = 0.0
 				var extra := " (line check)" if p["holds"].has("mech") else ""
+				var gate = grid.get_gate(p["gate_id"])
+				# No jet bridge means bussing every passenger, which takes longer.
+				if gate != null and not grid.gate_is_contact(gate):
+					p["turnaround"] *= REMOTE_STAND_FACTOR
+					extra += " (remote stand)"
 				add_log("%s at Gate %d, turning around%s." % [p["callsign"], p["gate_id"] + 1, extra])
 			elif p["service_wait"] >= SERVICE_PATIENCE and not p["delay_logged"]:
 				p["delay_logged"] = true
@@ -1387,6 +1404,18 @@ func apply_tool_at(cell: Vector2i) -> void:
 			else:
 				add_log("Built Gate %d — NOT connected to a taxiway, no flights will use it." % (id + 1))
 
+		Tool.TERMINAL:
+			if not grid.can_place_terminal(cell):
+				return
+			if money < COST_TERMINAL_TILE:
+				add_log("Not enough cash for a concourse section (%s)." % money_str(COST_TERMINAL_TILE))
+				return
+			money -= COST_TERMINAL_TILE
+			grid.place_terminal(cell)
+			add_log("Built concourse section for %s — terminal capacity now %d." % [
+				money_str(COST_TERMINAL_TILE), capacity("term"),
+			])
+
 		Tool.DEMOLISH:
 			var preview := grid.demolish_preview(cell)
 			if preview.is_empty():
@@ -1465,6 +1494,8 @@ func tile_cost(type: int) -> int:
 			return COST_RUNWAY_TILE
 		AirportGrid.TileType.GATE:
 			return COST_GATE_TILE
+		AirportGrid.TileType.TERMINAL:
+			return COST_TERMINAL_TILE
 	return 0
 
 
@@ -1809,7 +1840,13 @@ func _update_ops_ui() -> void:
 		money_str(last_day_revenue), money_str(last_upkeep),
 	]
 
-	for i in FACILITIES.size():
+	for i in 5:
+		var row_used := i < FACILITIES.size()
+		$UI/FacilityPanel.get_node("Row%dLabel" % i).visible = row_used
+		$UI/FacilityPanel.get_node("Row%dBuy" % i).visible = row_used
+		$UI/FacilityPanel.get_node("Row%dSell" % i).visible = row_used
+		if not row_used:
+			continue
 		var f: Dictionary = FACILITIES[i]
 		var key: String = f["key"]
 		var n: int = facilities.get(key, 0)
@@ -1901,18 +1938,21 @@ func _update_hud() -> void:
 			usable_runways += 1
 	var connected_gates := 0
 	var wide_stands := 0
+	var contact_stands := 0
 	for g in grid.gates:
 		if grid.gate_is_connected(g):
 			connected_gates += 1
 			if g["size"] >= 2:
 				wide_stands += 1
+			if grid.gate_is_contact(g):
+				contact_stands += 1
 	var longest := 0.0
 	for r in grid.runways:
 		if grid.runway_is_usable(r):
 			longest = maxf(longest, grid.runway_length_tiles(r))
-	stats_label.text = "Runways: %d (%d usable, longest %s → %s)\nStands: %d connected of %d (%d widebody)\nAircraft: %d\nServed: %d   Lost: %d" % [
+	stats_label.text = "Runways: %d (%d usable, longest %s → %s)\nStands: %d connected of %d (%d widebody, %d bridged)\nAircraft: %d\nServed: %d   Lost: %d" % [
 		grid.runways.size(), usable_runways, length_str(longest), _runway_capability(longest),
-		connected_gates, grid.gates.size(), wide_stands, planes.size(),
+		connected_gates, grid.gates.size(), wide_stands, contact_stands, planes.size(),
 		served, diverted,
 	]
 
@@ -1954,6 +1994,9 @@ func _update_hud() -> void:
 		Tool.GATE_LARGE:
 			hint_label.text = "STAND (widebody) — 2 tiles wide.\nTakes any aircraft, including Widebody."
 			tool_info_label.text = money_str(COST_GATE_TILE * 2)
+		Tool.TERMINAL:
+			hint_label.text = "CONCOURSE — click to build. Stands touching one\nget a jet bridge; the rest have to bus passengers."
+			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_TERMINAL_TILE), TERM_UNITS_PER_TILE]
 		Tool.DEMOLISH:
 			hint_label.text = "DEMOLISH — click to remove.\nOccupied gates and runways can't be removed."
 			tool_info_label.text = "Refunds %d%%" % int(REFUND_RATE * 100)
@@ -1970,8 +2013,12 @@ func _draw() -> void:
 	_draw_grid_lines(field)
 
 	for cell in grid.tiles:
-		if grid.tile_type(cell) == AirportGrid.TileType.TAXIWAY:
-			_draw_tile(cell, Color(0.40, 0.40, 0.43))
+		match grid.tile_type(cell):
+			AirportGrid.TileType.TAXIWAY:
+				_draw_tile(cell, Color(0.40, 0.40, 0.43))
+			AirportGrid.TileType.TERMINAL:
+				_draw_tile(cell, Color(0.36, 0.33, 0.45))
+				draw_rect(_cell_rect(cell), Color(0.62, 0.58, 0.78), false, 1.5)
 
 	for r in grid.runways:
 		_draw_runway(r)
@@ -2158,6 +2205,8 @@ func _draw_ghost() -> void:
 	match tool:
 		Tool.TAXIWAY:
 			ok = grid.can_place_taxiway(hover_cell) and money >= COST_TAXIWAY
+		Tool.TERMINAL:
+			ok = grid.can_place_terminal(hover_cell) and money >= COST_TERMINAL_TILE
 		Tool.GATE_SMALL, Tool.GATE_LARGE:
 			var size := tool_gate_size()
 			cells = grid.gate_cells_for(hover_cell, size)

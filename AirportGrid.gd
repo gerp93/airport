@@ -1,6 +1,6 @@
 extends RefCounted
 
-enum TileType { EMPTY, TAXIWAY, RUNWAY, GATE }
+enum TileType { EMPTY, TAXIWAY, RUNWAY, GATE, TERMINAL }
 
 const COLS := 32
 const ROWS := 18
@@ -75,7 +75,8 @@ func is_navigable(c: Vector2i) -> bool:
 
 func _refresh_cell(c: Vector2i) -> void:
 	var t := tile_type(c)
-	_astar.set_point_solid(c, t == TileType.EMPTY)
+	# Terminals are buildings, so aircraft route around them like open ground.
+	_astar.set_point_solid(c, t == TileType.EMPTY or t == TileType.TERMINAL)
 	_astar.set_point_weight_scale(c, RUNWAY_WEIGHT if t == TileType.RUNWAY else 1.0)
 
 
@@ -88,6 +89,33 @@ func can_place_taxiway(c: Vector2i) -> bool:
 func place_taxiway(c: Vector2i) -> void:
 	tiles[c] = {"type": TileType.TAXIWAY, "entity_id": -1}
 	_refresh_cell(c)
+
+
+func can_place_terminal(c: Vector2i) -> bool:
+	return in_bounds(c) and tile_type(c) == TileType.EMPTY
+
+
+func place_terminal(c: Vector2i) -> void:
+	tiles[c] = {"type": TileType.TERMINAL, "entity_id": -1}
+	_refresh_cell(c)
+
+
+func terminal_tile_count() -> int:
+	var n := 0
+	for c in tiles:
+		if tiles[c]["type"] == TileType.TERMINAL:
+			n += 1
+	return n
+
+
+# A stand touching a terminal is a contact stand — passengers walk a jet bridge.
+# One that isn't still works, but everyone has to be bussed out to it.
+func gate_is_contact(gate: Dictionary) -> bool:
+	for c in gate["cells"]:
+		for n in neighbors(c):
+			if tile_type(n) == TileType.TERMINAL:
+				return true
+	return false
 
 
 func line_cells(from: Vector2i, to: Vector2i) -> Array:
@@ -484,7 +512,7 @@ func demolish_preview(c: Vector2i) -> Dictionary:
 	match t:
 		TileType.EMPTY:
 			return {}
-		TileType.TAXIWAY:
+		TileType.TAXIWAY, TileType.TERMINAL:
 			if claims.has(c):
 				return {}
 			return {"type": t, "tiles": 1, "cells": [c]}
@@ -574,3 +602,5 @@ func seed_starter_airport() -> void:
 		place_taxiway(Vector2i(20, y))
 	for x in [10, 13, 16]:
 		place_gate(gate_cells_for(Vector2i(x, 6), 1), 1)
+		# Concourse behind each stand, so they start as contact stands.
+		place_terminal(Vector2i(x, 5))

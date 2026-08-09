@@ -97,7 +97,7 @@ text = "Select a holding plane, then a free stand."
 [node name="SelectBtn" type="Button" parent="UI"]
 offset_left = 10.0
 offset_top = 680.0
-offset_right = 120.0
+offset_right = 110.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -106,9 +106,9 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Select"
 
 [node name="TaxiwayBtn" type="Button" parent="UI"]
-offset_left = 126.0
+offset_left = 116.0
 offset_top = 680.0
-offset_right = 236.0
+offset_right = 216.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -116,9 +116,9 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Taxiway"
 
 [node name="RunwayBtn" type="Button" parent="UI"]
-offset_left = 242.0
+offset_left = 222.0
 offset_top = 680.0
-offset_right = 352.0
+offset_right = 322.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -126,9 +126,9 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Runway"
 
 [node name="GateSmallBtn" type="Button" parent="UI"]
-offset_left = 358.0
+offset_left = 328.0
 offset_top = 680.0
-offset_right = 468.0
+offset_right = 428.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -136,19 +136,29 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Stand S"
 
 [node name="GateLargeBtn" type="Button" parent="UI"]
-offset_left = 474.0
+offset_left = 434.0
 offset_top = 680.0
-offset_right = 584.0
+offset_right = 534.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
 text = "Stand W"
 
-[node name="DemolishBtn" type="Button" parent="UI"]
-offset_left = 590.0
+[node name="TerminalBtn" type="Button" parent="UI"]
+offset_left = 540.0
 offset_top = 680.0
-offset_right = 700.0
+offset_right = 640.0
+offset_bottom = 712.0
+focus_mode = 0
+toggle_mode = true
+button_group = SubResource("ButtonGroup_tools")
+text = "Concourse"
+
+[node name="DemolishBtn" type="Button" parent="UI"]
+offset_left = 646.0
+offset_top = 680.0
+offset_right = 746.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -156,7 +166,7 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Demolish"
 
 [node name="ToolInfoLabel" type="Label" parent="UI"]
-offset_left = 710.0
+offset_left = 756.0
 offset_top = 684.0
 offset_right = 1090.0
 offset_bottom = 706.0
