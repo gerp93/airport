@@ -50,6 +50,9 @@ const MAX_BLOCK_TIME := 20.0
 const REP_PER_TURNAROUND := 1
 const REP_MAX := 100
 
+const SAVE_PATH := "user://airport_save.dat"
+const SAVE_VERSION := 1
+
 const MAX_CONTRACTS := 2
 # Signed contracts generate their own traffic, so taking one you can't handle
 # actively floods the airport instead of just sitting in a list.
@@ -118,6 +121,9 @@ func _ready() -> void:
 	$UI/GameOverPanel/RestartBtn.pressed.connect(func(): get_tree().reload_current_scene())
 	$UI/ContractPanel/AcceptBtn.pressed.connect(accept_offer)
 	$UI/ContractPanel/DeclineBtn.pressed.connect(decline_offer)
+	$UI/ContractPanel/SaveBtn.pressed.connect(save_game)
+	$UI/ContractPanel/LoadBtn.pressed.connect(load_game)
+	_refresh_save_buttons()
 
 	add_log("Airport open. Build taxiways to connect runways and gates.")
 
@@ -839,6 +845,16 @@ func tile_cost(type: int) -> int:
 # --- input ---
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Save/load stay available after a shutdown so a bad run can be rolled back.
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_F5:
+				save_game()
+				return
+			KEY_F9:
+				load_game()
+				return
+
 	if game_over:
 		return
 
@@ -971,6 +987,71 @@ func _simulate(dt: float) -> void:
 		if p["state"] == "REMOVE":
 			grid.release_all(p["id"])
 	planes = planes.filter(func(p): return p["state"] != "REMOVE")
+
+
+# --- persistence ---
+
+func save_game() -> void:
+	# Saving a shut-down airport would just reload straight back into game over.
+	if game_over:
+		add_log("Can't save a shut-down airport.")
+		return
+	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	if f == null:
+		add_log("Could not write the save file.")
+		return
+	f.store_var({
+		"version": SAVE_VERSION,
+		"money": money, "reputation": reputation, "time_elapsed": time_elapsed,
+		"served": served, "diverted": diverted, "earned": earned,
+		"next_spawn_at": next_spawn_at, "plane_id_seq": plane_id_seq,
+		"contracts": contracts.duplicate(true),
+		"offer": null if offer == null else offer.duplicate(true),
+		"next_offer_at": next_offer_at,
+		"grid": grid.to_dict(),
+	})
+	f.close()
+	add_log("Airport saved.")
+	_refresh_save_buttons()
+
+
+func load_game() -> void:
+	if not FileAccess.file_exists(SAVE_PATH):
+		return
+	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	if f == null:
+		add_log("Could not read the save file.")
+		return
+	var d = f.get_var()
+	f.close()
+	if typeof(d) != TYPE_DICTIONARY or d.get("version") != SAVE_VERSION:
+		add_log("That save was made by a different version — ignoring it.")
+		return
+
+	# Airborne aircraft are not saved, so clear the sky before restoring.
+	planes.clear()
+	selected_plane_id = -1
+	grid.from_dict(d["grid"])
+
+	money = d["money"]
+	reputation = d["reputation"]
+	time_elapsed = d["time_elapsed"]
+	served = d["served"]
+	diverted = d["diverted"]
+	earned = d["earned"]
+	next_spawn_at = d["next_spawn_at"]
+	plane_id_seq = d["plane_id_seq"]
+	contracts = d["contracts"]
+	offer = d["offer"]
+	next_offer_at = d["next_offer_at"]
+
+	game_over = false
+	$UI/GameOverPanel.visible = false
+	add_log("Airport restored — the sky starts empty.")
+
+
+func _refresh_save_buttons() -> void:
+	$UI/ContractPanel/LoadBtn.disabled = not FileAccess.file_exists(SAVE_PATH)
 
 
 func _class_requirements() -> String:

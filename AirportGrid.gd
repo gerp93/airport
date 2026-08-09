@@ -381,6 +381,37 @@ func demolish(c: Vector2i) -> Dictionary:
 	return preview
 
 
+# --- persistence ---
+# Only layout is serialized. Claims and occupancy belong to live aircraft, which
+# are not restored, so they are rebuilt empty on load.
+
+func to_dict() -> Dictionary:
+	return {
+		"tiles": tiles.duplicate(true),
+		"runways": runways.duplicate(true),
+		"gates": gates.duplicate(true),
+		"runway_seq": _runway_seq,
+		"gate_seq": _gate_seq,
+	}
+
+
+func from_dict(d: Dictionary) -> void:
+	tiles = d["tiles"]
+	runways = d["runways"]
+	gates = d["gates"]
+	_runway_seq = d["runway_seq"]
+	_gate_seq = d["gate_seq"]
+
+	claims.clear()
+	for r in runways:
+		r["occupied"] = false
+	for g in gates:
+		g["occupied"] = false
+	for y in ROWS:
+		for x in COLS:
+			_refresh_cell(Vector2i(x, y))
+
+
 # --- starting layout ---
 
 func seed_starter_airport() -> void:
