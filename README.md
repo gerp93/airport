@@ -8,6 +8,10 @@ weather and emergencies you didn't.
 
 Placeholder shapes only (rectangles and triangles), no art assets.
 
+This repo follows [gerp93/KVG_Standards](https://github.com/gerp93/KVG_Standards)
+— see that repo's `game-repos.md` for how those standards apply to game repos,
+and `TODO.md` here for this game's own backlog.
+
 ## The loop
 
 Aircraft circle in the air until a runway is clear, land, roll out to a
@@ -191,6 +195,13 @@ Building works while paused, which is the intended way to plan a big change.
 1. Install [Godot 4.3+](https://godotengine.org/download).
 2. Open this folder as an existing project.
 3. Press Play (F5).
+
+## License
+
+AGPL-3.0 — see `LICENSE`. The game has no third-party dependencies; Godot
+Engine itself is MIT, which is permissive and imposes no obstacle, but an
+exported build bundles the engine and must carry Godot's copyright notice (see
+`game-repos.md` in KVG_Standards).
 
 ## Code layout
 
