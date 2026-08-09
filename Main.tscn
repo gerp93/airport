@@ -440,6 +440,78 @@ theme_override_styles/hover = SubResource("StyleBoxFlat_restart")
 theme_override_styles/pressed = SubResource("StyleBoxFlat_restart")
 text = "New airport"
 
+[node name="StartPanel" type="Panel" parent="UI"]
+offset_left = 420.0
+offset_top = 210.0
+offset_right = 1020.0
+offset_bottom = 640.0
+theme_override_styles/panel = SubResource("StyleBoxFlat_gameover")
+
+[node name="Title" type="Label" parent="UI/StartPanel"]
+offset_left = 28.0
+offset_top = 22.0
+offset_right = 572.0
+offset_bottom = 48.0
+theme_override_font_sizes/font_size = 19
+text = "WHERE IS YOUR AIRPORT?"
+
+[node name="Sub" type="Label" parent="UI/StartPanel"]
+offset_left = 28.0
+offset_top = 54.0
+offset_right = 572.0
+offset_bottom = 104.0
+theme_override_font_sizes/font_size = 13
+autowrap_mode = 2
+text = ""
+
+[node name="Opt0" type="Button" parent="UI/StartPanel"]
+offset_left = 28.0
+offset_top = 112.0
+offset_right = 572.0
+offset_bottom = 148.0
+focus_mode = 0
+text = ""
+
+[node name="Opt1" type="Button" parent="UI/StartPanel"]
+offset_left = 28.0
+offset_top = 154.0
+offset_right = 572.0
+offset_bottom = 190.0
+focus_mode = 0
+text = ""
+
+[node name="Opt2" type="Button" parent="UI/StartPanel"]
+offset_left = 28.0
+offset_top = 196.0
+offset_right = 572.0
+offset_bottom = 232.0
+focus_mode = 0
+text = ""
+
+[node name="Opt3" type="Button" parent="UI/StartPanel"]
+offset_left = 28.0
+offset_top = 238.0
+offset_right = 572.0
+offset_bottom = 274.0
+focus_mode = 0
+text = ""
+
+[node name="Opt4" type="Button" parent="UI/StartPanel"]
+offset_left = 28.0
+offset_top = 280.0
+offset_right = 572.0
+offset_bottom = 316.0
+focus_mode = 0
+text = ""
+
+[node name="Opt5" type="Button" parent="UI/StartPanel"]
+offset_left = 28.0
+offset_top = 322.0
+offset_right = 572.0
+offset_bottom = 358.0
+focus_mode = 0
+text = ""
+
 [node name="LogLabel" type="RichTextLabel" parent="UI"]
 offset_left = 10.0
 offset_top = 718.0

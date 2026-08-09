@@ -1,6 +1,7 @@
 extends Node2D
 
 const AirportGrid = preload("res://AirportGrid.gd")
+const Regions = preload("res://Regions.gd")
 
 enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, DEMOLISH }
 
@@ -154,6 +155,15 @@ var offer = null
 var contracts: Array = []
 var next_offer_at := 25.0
 
+# Setup runs before the simulation: 0 picks a continent, 1 picks a region, 2 plays.
+var setup_stage := 0
+var continent_idx := -1
+var continent_name := ""
+var region := {}
+var weather := {}
+var weather_until := 0.0
+var next_weather_at := 100.0
+
 var selected_plane_id := -1
 var tool: Tool = Tool.SELECT
 var hover_cell := AirportGrid.NOWHERE
@@ -203,6 +213,16 @@ func _ready() -> void:
 			$UI/RoutePanel/SaveBtn, $UI/RoutePanel/LoadBtn]:
 		_style_button(b)
 
+	for i in 6:
+		var b: Button = $UI/StartPanel.get_node("Opt%d" % i)
+		b.pressed.connect(_choose_setup.bind(i))
+		_style_button(b)
+	# Headless balance runs can't click, so they take the first region.
+	if _echo_log or _auto_sign:
+		_choose_setup(0)
+		_choose_setup(0)
+	_show_setup()
+
 	facilities = START_FACILITIES.duplicate()
 	for i in FACILITIES.size():
 		var fkey: String = FACILITIES[i]["key"]
@@ -212,6 +232,57 @@ func _ready() -> void:
 		_style_button($UI/FacilityPanel.get_node("Row%dSell" % i))
 
 	add_log("Airport open. Build taxiways to connect runways and gates.")
+
+
+# --- location setup ---
+
+func _show_setup() -> void:
+	$UI/StartPanel.visible = setup_stage < 2
+	if setup_stage >= 2:
+		return
+
+	var opts: Array = []
+	if setup_stage == 0:
+		$UI/StartPanel/Title.text = "WHERE IS YOUR AIRPORT?"
+		$UI/StartPanel/Sub.text = "Pick a continent. Your location decides which airports feed you traffic and what weather you have to operate through."
+		for c in Regions.CONTINENTS:
+			opts.append(c["name"])
+	else:
+		$UI/StartPanel/Title.text = continent_name.to_upper()
+		$UI/StartPanel/Sub.text = "Pick a region. Each has its own weather to contend with."
+		for r in Regions.CONTINENTS[continent_idx]["regions"]:
+			var kinds := []
+			for k in r["weather"]:
+				kinds.append(Regions.WEATHER[k]["name"])
+			opts.append("%s  —  %s" % [r["name"], ", ".join(kinds)])
+
+	for i in 6:
+		var b: Button = $UI/StartPanel.get_node("Opt%d" % i)
+		b.visible = i < opts.size()
+		if i < opts.size():
+			b.text = opts[i]
+
+
+func _choose_setup(i: int) -> void:
+	if setup_stage == 0:
+		if i >= Regions.CONTINENTS.size():
+			return
+		continent_idx = i
+		continent_name = Regions.CONTINENTS[i]["name"]
+		setup_stage = 1
+		_show_setup()
+	elif setup_stage == 1:
+		var regions: Array = Regions.CONTINENTS[continent_idx]["regions"]
+		if i >= regions.size():
+			return
+		region = regions[i]
+		setup_stage = 2
+		_show_setup()
+		add_log("Airport sited in %s, %s." % [region["name"], continent_name])
+		var kinds := []
+		for k in region["weather"]:
+			kinds.append(Regions.WEATHER[k]["name"].to_lower())
+		add_log("Local conditions to expect: %s." % ", ".join(kinds))
 
 
 func _style_button(b: Button) -> void:
@@ -382,6 +453,52 @@ func airborne_count() -> int:
 		if p["state"] in ["AIR_HOLD", "APPROACH", "INBOUND", "LANDING"]:
 			n += 1
 	return n
+
+
+# --- weather ---
+
+func wx(field: String, default_value: float) -> float:
+	if weather.is_empty():
+		return default_value
+	return weather.get(field, default_value)
+
+
+func wx_closed() -> bool:
+	return not weather.is_empty() and bool(weather.get("closed", false))
+
+
+# Weather mostly costs revenue rather than reputation: arrivals stop coming, so
+# you lose the fees. Aircraft already holding burn patience at half rate and
+# divert for half the usual reputation, because a storm isn't the airport's fault.
+func effective_air_capacity() -> int:
+	return maxi(1, int(round(capacity("tower") * wx("arrivals", 1.0))))
+
+
+func required_runway(p: Dictionary) -> int:
+	return int(ceil(class_of(p)["min_runway"] * wx("length", 1.0)))
+
+
+func taxi_speed() -> float:
+	return TAXI_SPEED * wx("taxi", 1.0)
+
+
+func update_weather() -> void:
+	if not weather.is_empty():
+		if time_elapsed >= weather_until:
+			add_log("%s has cleared." % weather["name"])
+			weather = {}
+			next_weather_at = time_elapsed + 90.0 + randf() * 120.0
+		return
+	if region.is_empty() or time_elapsed < next_weather_at:
+		return
+
+	var kinds: Array = region["weather"]
+	var kind: String = kinds[randi() % kinds.size()]
+	var def: Dictionary = Regions.WEATHER[kind]
+	weather = def.duplicate()
+	weather["kind"] = kind
+	weather_until = time_elapsed + 30.0 + randf() * 30.0
+	add_log("WEATHER — %s: %s." % [def["name"], def["blurb"]])
 
 
 # --- day cycle ---
@@ -630,7 +747,10 @@ func release_plane(p: Dictionary) -> void:
 
 
 func divert(p: Dictionary, reason: String, rep_cost: int) -> void:
-	reputation = max(0, reputation - rep_cost)
+	var cost := rep_cost
+	if wx_closed():
+		cost = maxi(1, rep_cost / 2)
+	reputation = max(0, reputation - cost)
 	diverted += 1
 	add_log("%s DIVERTED — %s. Reputation -%d." % [p["callsign"], reason, rep_cost])
 	release_plane(p)
@@ -643,7 +763,7 @@ func class_of(p: Dictionary) -> Dictionary:
 
 
 func runway_fits(r: Dictionary, p: Dictionary) -> bool:
-	return r["cells"].size() >= class_of(p)["min_runway"]
+	return r["cells"].size() >= required_runway(p)
 
 
 func gate_fits(g: Dictionary, p: Dictionary) -> bool:
@@ -720,6 +840,8 @@ func runway_has_waiting_departure(runway_id: int) -> bool:
 # Arrivals must not starve departures: a plane already holding short goes first,
 # otherwise a steady arrival stream traps outbound traffic until it gets towed.
 func find_arrival_runway(p: Dictionary) -> Variant:
+	if wx_closed():
+		return null
 	for r in grid.runways:
 		if not runway_fits(r, p):
 			continue
@@ -729,6 +851,8 @@ func find_arrival_runway(p: Dictionary) -> Variant:
 
 
 func find_departure_runway(p: Dictionary) -> Dictionary:
+	if wx_closed():
+		return {}
 	for r in grid.runways:
 		if not grid.runway_is_usable(r) or not runway_fits(r, p):
 			continue
@@ -759,7 +883,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 
 	match p["state"]:
 		"AIR_HOLD":
-			p["air_hold_timer"] += dt
+			p["air_hold_timer"] += dt * (0.5 if wx_closed() else 1.0)
 			var t: float = p["air_hold_timer"] * 1.2 + p["orbit_phase"]
 			var r: float = p["orbit_radius"]
 			var orbit := AIR_ANCHOR + Vector2(sin(t) * r, cos(t) * r * 0.6)
@@ -851,7 +975,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			if try_assign_gate(p):
 				return
 			if p["path_index"] < p["path"].size():
-				advance_along_path(p, TAXI_SPEED, dt)
+				advance_along_path(p, taxi_speed(), dt)
 			elif p["path"].is_empty():
 				var spot: Vector2i = grid.nearest_free_taxiway(p["cell"], p["id"])
 				if spot != AirportGrid.NOWHERE:
@@ -862,7 +986,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				divert(p, "too long without a gate", 10)
 
 		"TAXI_TO_GATE":
-			match advance_along_path(p, TAXI_SPEED, dt):
+			match advance_along_path(p, taxi_speed(), dt):
 				"arrived":
 					p["state"] = "AWAIT_SERVICE"
 					p["state_timer"] = 0.0
@@ -925,7 +1049,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			p["state_timer"] = 0.0
 
 		"TAXI_OUT":
-			match advance_along_path(p, TAXI_SPEED, dt):
+			match advance_along_path(p, taxi_speed(), dt):
 				"arrived":
 					p["state"] = "HOLD_SHORT"
 					p["state_timer"] = 0.0
@@ -1066,6 +1190,9 @@ func tile_cost(type: int) -> int:
 # --- input ---
 
 func _unhandled_input(event: InputEvent) -> void:
+	if setup_stage < 2:
+		return
+
 	# Save/load stay available after a shutdown so a bad run can be rolled back.
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
@@ -1161,7 +1288,7 @@ func _handle_select_click(pos: Vector2, cell: Vector2i) -> void:
 
 func _process(delta: float) -> void:
 	# Building stays fully usable while paused, so only the simulation is gated.
-	var dt := 0.0 if (paused or game_over) else delta * speed
+	var dt := 0.0 if (paused or game_over or setup_stage < 2) else delta * speed
 	if dt > 0.0:
 		_simulate(dt)
 		if reputation <= 0:
@@ -1194,7 +1321,10 @@ func _end_run() -> void:
 # The tower caps concurrent airborne traffic, so tower capacity is the thing
 # that decides how many inbound flights the airport can accept at all.
 func _try_spawn() -> void:
-	if airborne_count() >= capacity("tower"):
+	if wx_closed():
+		next_spawn_at = time_elapsed + 3.0
+		return
+	if airborne_count() >= effective_air_capacity():
 		next_spawn_at = time_elapsed + 2.0
 		return
 	spawn_plane()
@@ -1211,6 +1341,7 @@ func _simulate(dt: float) -> void:
 	if day_time >= DAY_LENGTH:
 		day_time -= DAY_LENGTH
 		end_of_day()
+	update_weather()
 	update_contracts()
 
 	if time_elapsed >= next_spawn_at:
@@ -1340,10 +1471,17 @@ func _class_requirements() -> String:
 
 func _update_ops_ui() -> void:
 	var left := int(max(0.0, DAY_LENGTH - day_time))
-	day_label.text = "Day %d · %ds to close" % [day, left]
+	var wx_txt := ""
+	if not weather.is_empty():
+		wx_txt = " · %s %ds%s" % [
+			weather["name"], int(max(0.0, weather_until - time_elapsed)),
+			" CLOSED" if wx_closed() else "",
+		]
+	day_label.text = "Day %d · %ds to close%s" % [day, left, wx_txt]
+	day_label.modulate = Color(1.0, 0.72, 0.35) if not weather.is_empty() else Color.WHITE
 
 	capacity_label.text = "Airborne %d/%d · Crew %d/%d · Fuel %d/%d\nTerminal %d/%d · Checks %d/%d\nUpkeep %s/day\nLast day: %s in, %s out" % [
-		airborne_count(), capacity("tower"),
+		airborne_count(), effective_air_capacity(),
 		used["crew"], capacity("crew"),
 		used["fuel"], capacity("fuel"),
 		used["term"], capacity("term"),
