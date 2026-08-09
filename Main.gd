@@ -2100,7 +2100,9 @@ func _update_hud() -> void:
 				var cap := _runway_capability(total)
 				var takes := "too short" if cap == "-" else "takes " + cap
 				var prefix := "extend to " if ext >= 0 else ""
-				var heading := "%03d°" % int(round(rad_to_deg(atan2((pb - pa).x, -(pb - pa).y) + TAU)) % 360)
+				# int() has to close before the modulo, not after it: round() returns
+				# a float and GDScript's % rejects float operands outright.
+				var heading := "%03d°" % (int(round(rad_to_deg(atan2((pb - pa).x, -(pb - pa).y) + TAU))) % 360)
 				tool_info_label.text = "%s%s · %s · %s · %s" % [prefix, length_str(total), heading, takes, money_str(cost)]
 			else:
 				tool_info_label.text = "%s per tile" % money_str(COST_RUNWAY_TILE)

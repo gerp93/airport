@@ -114,8 +114,21 @@ Useful signals in the log: `towed off` and `gridlocked` mean the traffic
 reservation system deadlocked; `TURNED AWAY` means scheduled volume exceeded
 capacity; `stuck at Gate` names whichever ground resource is short.
 
+The balance run never picks up a build tool, because it has no cursor. Tool
+hover/drag code — the HUD readouts, the ghost preview, the renderer's ghost —
+is therefore invisible to it, and a crash lived in the runway heading readout
+until a human selected the tool. Cover that path too:
+
+```bash
+godot --headless --path . --fixed-fps 60 res://ToolSweep.tscn 2>&1 | grep "SCRIPT ERROR"
+```
+
 GDScript gotchas that have cost real time here: `clamp()` and
 `Dictionary.get()` return `Variant`, so `var x := clamp(...)` fails the
 "inferred from Variant" check — use `clampf()`/`minf()`/`maxf()` or annotate
 the type. `%g` is not a valid format specifier and throws at runtime, not
-parse time.
+parse time. `round()` returns a **float** and `%` rejects float operands, so
+`int(round(x) % n)` throws where `int(round(x)) % n` is meant — note that both
+parse fine and only the second is correct. Untyped assignment from a preloaded
+script's constant (`var t = AirportGrid.TILE`) infers `Variant` and poisons
+every expression derived from it, while `var t: float = ...` does not.
