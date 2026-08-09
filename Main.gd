@@ -231,14 +231,14 @@ func _ready() -> void:
 	$UI/GameOverPanel/RestartBtn.pressed.connect(func(): get_tree().reload_current_scene())
 	$UI/RoutePanel/AcceptBtn.pressed.connect(accept_offer)
 	$UI/RoutePanel/DeclineBtn.pressed.connect(decline_offer)
-	$UI/RoutePanel/SaveBtn.pressed.connect(save_game)
-	$UI/RoutePanel/LoadBtn.pressed.connect(load_game)
+	$UI/SaveBtn.pressed.connect(save_game)
+	$UI/LoadBtn.pressed.connect(load_game)
 	_refresh_save_buttons()
 
 	# Godot's default Button style nearly vanishes on a dark panel, so the sidebar
 	# controls get an explicit one.
 	for b in [$UI/RoutePanel/AcceptBtn, $UI/RoutePanel/DeclineBtn,
-			$UI/RoutePanel/SaveBtn, $UI/RoutePanel/LoadBtn]:
+			$UI/SaveBtn, $UI/LoadBtn]:
 		_style_button(b)
 
 	for i in 6:
@@ -1167,7 +1167,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				set_path(p, cells.slice(0, cells.find(exit_cell) + 1))
 				p["state"] = "LANDING"
 				p["state_timer"] = 0.0
-				add_log("%s touching down on Runway %d." % [p["callsign"], runway["id"] + 1])
+				add_log("%s touching down on Runway %s." % [p["callsign"], grid.runway_name(runway)])
 
 		"LANDING":
 			match advance_along_path(p, ROLLOUT_SPEED, dt):
@@ -1394,15 +1394,27 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 	if money < cost:
 		add_log("Not enough cash — that runway costs %s." % money_str(cost))
 		return
+	# Painting pavement onto the end of an existing runway lengthens it, so a
+	# runway can grow past a class threshold without being rebuilt.
+	var extend_id := grid.runway_extended_by(cells)
+	if extend_id >= 0:
+		money -= cost
+		grid.extend_runway(extend_id, cells)
+		var grown = grid.get_runway(extend_id)
+		add_log("Extended Runway %s to %s for %s — now takes %s." % [
+			grid.runway_name(grown), length_str(grown["cells"].size()), money_str(cost),
+			_runway_capability(grown["cells"].size()),
+		])
+		return
 	money -= cost
 	var id := grid.place_runway(cells)
 	var runway = grid.get_runway(id)
 	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
-		add_log("Built Runway %d for %s — TOO SHORT (needs %s)." % [id + 1, money_str(cost), length_str(AirportGrid.MIN_RUNWAY_LEN)])
+		add_log("Built Runway %s for %s — TOO SHORT (needs %s)." % [grid.runway_name(runway), money_str(cost), length_str(AirportGrid.MIN_RUNWAY_LEN)])
 	elif not grid.runway_is_usable(runway):
-		add_log("Built Runway %d for %s — no taxiway connection yet." % [id + 1, money_str(cost)])
+		add_log("Built Runway %s for %s — no taxiway connection yet." % [grid.runway_name(runway), money_str(cost)])
 	else:
-		add_log("Built Runway %d for %s." % [id + 1, money_str(cost)])
+		add_log("Built Runway %s for %s." % [grid.runway_name(runway), money_str(cost)])
 
 
 func tool_gate_size() -> int:
@@ -1702,7 +1714,7 @@ func load_game() -> void:
 
 
 func _refresh_save_buttons() -> void:
-	$UI/RoutePanel/LoadBtn.disabled = not FileAccess.file_exists(SAVE_PATH)
+	$UI/LoadBtn.disabled = not FileAccess.file_exists(SAVE_PATH)
 
 
 # GDScript has no thousands separator, and "10800 ft" reads badly.
@@ -1882,10 +1894,19 @@ func _update_hud() -> void:
 			# Live length while dragging — you need to know when you cross a
 			# class threshold, not after you've paid for the runway.
 			if is_dragging and grid.in_bounds(drag_start) and grid.in_bounds(hover_cell):
-				var n: int = grid.line_cells(drag_start, hover_cell).size()
-				var cap := _runway_capability(n)
+				var painted: Array = grid.line_cells(drag_start, hover_cell)
+				var n: int = painted.size()
+				var cost: int = COST_RUNWAY_TILE * n
+				# Show the combined length when this would extend a runway, otherwise
+				# the readout claims a threshold miss the finished runway won't have.
+				var ext := grid.runway_extended_by(painted)
+				var total := n
+				if ext >= 0:
+					total += grid.get_runway(ext)["cells"].size()
+				var cap := _runway_capability(total)
 				var takes := "too short" if cap == "-" else "takes " + cap
-				tool_info_label.text = "%s · %s · %s" % [length_str(n), takes, money_str(COST_RUNWAY_TILE * n)]
+				var prefix := "extend to " if ext >= 0 else ""
+				tool_info_label.text = "%s%s · %s · %s" % [prefix, length_str(total), takes, money_str(cost)]
 			else:
 				tool_info_label.text = "%s per tile" % money_str(COST_RUNWAY_TILE)
 		Tool.GATE_SMALL:
@@ -1968,7 +1989,7 @@ func _draw_runway(r: Dictionary) -> void:
 		for c in cells:
 			draw_rect(_cell_rect(c), Color(1.0, 0.35, 0.35, 0.9), false, 1.0)
 
-	var label := "RWY %d · %s · %s" % [r["id"] + 1, length_str(cells.size()), _runway_capability(cells.size())]
+	var label := "RWY %s · %s · %s" % [grid.runway_name(r), length_str(cells.size()), _runway_capability(cells.size())]
 	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
 		label += " (TOO SHORT)"
 	elif not usable:

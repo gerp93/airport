@@ -103,6 +103,47 @@ func line_cells(from: Vector2i, to: Vector2i) -> Array:
 	return cells
 
 
+# Which existing runway a straight segment would lengthen, or -1 for a new one.
+# Lets the player grow a runway past a class threshold by painting more pavement
+# at either end instead of demolishing and rebuilding the whole thing.
+func runway_extended_by(cells: Array) -> int:
+	if cells.is_empty():
+		return -1
+	var horizontal: bool = cells.size() < 2 or cells[0].y == cells[1].y
+	var sorted: Array = cells.duplicate()
+	sorted.sort_custom(func(a, b): return (a.x < b.x) if horizontal else (a.y < b.y))
+	var n_lo: int = sorted[0].x if horizontal else sorted[0].y
+	var n_hi: int = sorted[sorted.size() - 1].x if horizontal else sorted[sorted.size() - 1].y
+	var cross: int = sorted[0].y if horizontal else sorted[0].x
+
+	for r in runways:
+		if bool(r["horizontal"]) != horizontal:
+			continue
+		var rc: Array = r["cells"]
+		var r_cross: int = rc[0].y if horizontal else rc[0].x
+		if r_cross != cross:
+			continue
+		var r_lo: int = rc[0].x if horizontal else rc[0].y
+		var r_hi: int = rc[rc.size() - 1].x if horizontal else rc[rc.size() - 1].y
+		if n_hi + 1 == r_lo or n_lo - 1 == r_hi:
+			return int(r["id"])
+	return -1
+
+
+func extend_runway(id: int, cells: Array) -> void:
+	var r = get_runway(id)
+	if r == null:
+		return
+	for c in cells:
+		tiles[c] = {"type": TileType.RUNWAY, "entity_id": id}
+	var horizontal: bool = bool(r["horizontal"])
+	var all: Array = r["cells"] + cells
+	all.sort_custom(func(a, b): return (a.x < b.x) if horizontal else (a.y < b.y))
+	r["cells"] = all
+	for c in cells:
+		_refresh_cell(c)
+
+
 func can_place_runway(cells: Array) -> bool:
 	if cells.is_empty():
 		return false
@@ -208,6 +249,55 @@ func runway_threshold(r: Dictionary) -> Vector2i:
 
 func runway_direction(r: Dictionary) -> Vector2:
 	return Vector2.RIGHT if r["horizontal"] else Vector2.DOWN
+
+
+# Runway designators follow the real convention: the approach heading in tens of
+# degrees, with both ends listed. Screen y grows downward, so north is -y — an
+# east-west runway is 09/27 and a north-south one is 18/36.
+func runway_headings(r: Dictionary) -> Array:
+	var d: Vector2 = runway_direction(r)
+	var deg: float = rad_to_deg(atan2(d.x, -d.y))
+	if deg < 0.0:
+		deg += 360.0
+	var num := int(round(deg / 10.0))
+	if num == 0:
+		num = 36
+	var recip := num + 18
+	if recip > 36:
+		recip -= 36
+	return [mini(num, recip), maxi(num, recip)]
+
+
+# Parallel runways sharing a heading take L/C/R, and the suffix mirrors at the
+# far end the way it does in reality: 09L is 27R from the other direction.
+func runway_name(r: Dictionary) -> String:
+	var pair := runway_headings(r)
+	var siblings := []
+	for other in runways:
+		if runway_headings(other) == pair:
+			siblings.append(other)
+
+	if siblings.size() <= 1:
+		return "%02d/%02d" % pair
+
+	var horizontal: bool = bool(r["horizontal"])
+	siblings.sort_custom(func(a, b):
+		return (a["cells"][0].y < b["cells"][0].y) if horizontal \
+			else (a["cells"][0].x < b["cells"][0].x))
+
+	var idx := 0
+	for i in siblings.size():
+		if siblings[i]["id"] == r["id"]:
+			idx = i
+			break
+
+	var suffix := str(idx + 1)
+	if siblings.size() == 2:
+		suffix = "L" if idx == 0 else "R"
+	elif siblings.size() == 3:
+		suffix = ["L", "C", "R"][idx]
+	var mirrored: String = {"L": "R", "R": "L", "C": "C"}.get(suffix, suffix)
+	return "%02d%s/%02d%s" % [pair[0], suffix, pair[1], mirrored]
 
 
 # Where an outbound plane waits without standing on the runway itself.

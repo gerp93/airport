@@ -391,27 +391,11 @@ text = "Pass (D)"
 offset_left = 12.0
 offset_top = 182.0
 offset_right = 404.0
-offset_bottom = 234.0
+offset_bottom = 268.0
 theme_override_font_sizes/font_size = 12
 autowrap_mode = 2
 vertical_alignment = 0
 text = ""
-
-[node name="SaveBtn" type="Button" parent="UI/RoutePanel"]
-offset_left = 12.0
-offset_top = 240.0
-offset_right = 200.0
-offset_bottom = 270.0
-focus_mode = 0
-text = "Save (F5)"
-
-[node name="LoadBtn" type="Button" parent="UI/RoutePanel"]
-offset_left = 208.0
-offset_top = 240.0
-offset_right = 404.0
-offset_bottom = 270.0
-focus_mode = 0
-text = "Load (F9)"
 
 [node name="GameOverPanel" type="Panel" parent="UI"]
 visible = false
@@ -512,10 +496,26 @@ offset_bottom = 358.0
 focus_mode = 0
 text = ""
 
+[node name="SaveBtn" type="Button" parent="UI"]
+offset_left = 1244.0
+offset_top = 718.0
+offset_right = 1334.0
+offset_bottom = 750.0
+focus_mode = 0
+text = "Save (F5)"
+
+[node name="LoadBtn" type="Button" parent="UI"]
+offset_left = 1340.0
+offset_top = 718.0
+offset_right = 1430.0
+offset_bottom = 750.0
+focus_mode = 0
+text = "Load (F9)"
+
 [node name="LogLabel" type="RichTextLabel" parent="UI"]
 offset_left = 10.0
 offset_top = 718.0
-offset_right = 1430.0
+offset_right = 1232.0
 offset_bottom = 892.0
 bbcode_enabled = false
 scroll_active = true
