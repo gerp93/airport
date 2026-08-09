@@ -3,17 +3,18 @@ extends Node2D
 const AirportGrid = preload("res://AirportGrid.gd")
 const Regions = preload("res://Regions.gd")
 
-enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, TERMINAL, DEMOLISH }
+enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, TERMINAL, ROAD, PARKING, DEMOLISH }
 
 const TOOL_BUTTONS := {
 	Tool.SELECT: "SelectBtn", Tool.TAXIWAY: "TaxiwayBtn", Tool.RUNWAY: "RunwayBtn",
 	Tool.GATE_SMALL: "GateSmallBtn", Tool.GATE_LARGE: "GateLargeBtn",
-	Tool.TERMINAL: "TerminalBtn", Tool.DEMOLISH: "DemolishBtn",
+	Tool.TERMINAL: "TerminalBtn", Tool.ROAD: "RoadBtn",
+	Tool.PARKING: "ParkingBtn", Tool.DEMOLISH: "DemolishBtn",
 }
 const TOOL_KEYS := {
 	KEY_ESCAPE: Tool.SELECT, KEY_T: Tool.TAXIWAY, KEY_R: Tool.RUNWAY,
 	KEY_G: Tool.GATE_SMALL, KEY_H: Tool.GATE_LARGE, KEY_E: Tool.TERMINAL,
-	KEY_X: Tool.DEMOLISH,
+	KEY_O: Tool.ROAD, KEY_P: Tool.PARKING, KEY_X: Tool.DEMOLISH,
 }
 
 const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
@@ -106,6 +107,12 @@ const START_FACILITIES := {"tower": 1, "crew": 1, "fuel": 1, "mech": 0}
 const COST_TERMINAL_TILE := 18_000_000
 const UPKEEP_TERMINAL_TILE := 6_000
 const TERM_UNITS_PER_TILE := 3
+# Landside: passengers arrive by road and have to leave their cars somewhere.
+const COST_ROAD_TILE := 400_000
+const UPKEEP_ROAD_TILE := 200
+const COST_PARKING_TILE := 6_000_000
+const UPKEEP_PARKING_TILE := 1_500
+const PARK_UNITS_PER_TILE := 2
 # A stand with no jet bridge still works, but everyone has to be bussed.
 const REMOTE_STAND_FACTOR := 1.4
 
@@ -231,6 +238,8 @@ func _ready() -> void:
 	$UI/GateSmallBtn.pressed.connect(_set_tool.bind(Tool.GATE_SMALL))
 	$UI/GateLargeBtn.pressed.connect(_set_tool.bind(Tool.GATE_LARGE))
 	$UI/TerminalBtn.pressed.connect(_set_tool.bind(Tool.TERMINAL))
+	$UI/RoadBtn.pressed.connect(_set_tool.bind(Tool.ROAD))
+	$UI/ParkingBtn.pressed.connect(_set_tool.bind(Tool.PARKING))
 	$UI/DemolishBtn.pressed.connect(_set_tool.bind(Tool.DEMOLISH))
 
 	$UI/PauseBtn.toggled.connect(_on_pause_toggled)
@@ -422,7 +431,11 @@ func fac_def(key: String) -> Dictionary:
 
 func capacity(key: String) -> int:
 	if key == "term":
-		return grid.terminal_tile_count() * TERM_UNITS_PER_TILE
+		# Only concourse and parking that a road actually reaches can handle
+		# passengers, so landside access is a real constraint.
+		var conc := grid.count_tiles(AirportGrid.TileType.TERMINAL, true)
+		var park := grid.count_tiles(AirportGrid.TileType.PARKING, true)
+		return conc * TERM_UNITS_PER_TILE + park * PARK_UNITS_PER_TILE
 	return facilities.get(key, 0) * int(fac_def(key)["per_unit"])
 
 
@@ -436,6 +449,8 @@ func total_upkeep() -> int:
 		total += int(facilities.get(f["key"], 0)) * int(f["upkeep"])
 	total += grid.runways.size() * UPKEEP_RUNWAY
 	total += grid.terminal_tile_count() * UPKEEP_TERMINAL_TILE
+	total += grid.count_tiles(AirportGrid.TileType.ROAD, false) * UPKEEP_ROAD_TILE
+	total += grid.count_tiles(AirportGrid.TileType.PARKING, false) * UPKEEP_PARKING_TILE
 	total += grid.gates.size() * UPKEEP_STAND
 	return total
 
@@ -478,6 +493,21 @@ func try_start_service(p: Dictionary) -> bool:
 		used[k] = int(used[k]) + int(holds[k])
 	p["holds"] = holds
 	return true
+
+
+# Name the resource that is actually short. "No ground support" sent the player
+# hunting for crew when the real problem could be that no concourse has a road.
+func service_shortfall(p: Dictionary) -> String:
+	var need_term: int = class_of(p)["term_units"]
+	if free_capacity("term") < need_term:
+		if grid.count_tiles(AirportGrid.TileType.TERMINAL, true) == 0:
+			return "no concourse with road access"
+		return "passenger capacity full"
+	if free_capacity("crew") < 1:
+		return "no ground crew free"
+	if free_capacity("fuel") < 1:
+		return "no fuel truck free"
+	return "ground support busy"
 
 
 func release_service(p: Dictionary) -> void:
@@ -1267,7 +1297,9 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			elif p["service_wait"] >= SERVICE_PATIENCE and not p["delay_logged"]:
 				p["delay_logged"] = true
 				reputation = max(0, reputation - 4)
-				add_log("%s stuck at the stand — no ground support free. Reputation -4." % p["callsign"])
+				add_log("%s stuck at Gate %d — %s. Reputation -4." % [
+					p["callsign"], p["gate_id"] + 1, service_shortfall(p),
+				])
 
 		"AT_GATE":
 			if p["state_timer"] >= p["turnaround"]:
@@ -1412,9 +1444,31 @@ func apply_tool_at(cell: Vector2i) -> void:
 				return
 			money -= COST_TERMINAL_TILE
 			grid.place_terminal(cell)
-			add_log("Built concourse section for %s — terminal capacity now %d." % [
+			add_log("Built concourse section for %s — passenger capacity now %d." % [
 				money_str(COST_TERMINAL_TILE), capacity("term"),
 			])
+			if not grid.is_road_served(cell):
+				add_log("That concourse has no road access — it handles no passengers.")
+
+		Tool.ROAD:
+			if not grid.can_place_road(cell):
+				return
+			if money < COST_ROAD_TILE:
+				add_log("Not enough cash for road (%s)." % money_str(COST_ROAD_TILE))
+				return
+			money -= COST_ROAD_TILE
+			grid.place_road(cell)
+
+		Tool.PARKING:
+			if not grid.can_place_parking(cell):
+				return
+			if money < COST_PARKING_TILE:
+				add_log("Not enough cash for a car park (%s)." % money_str(COST_PARKING_TILE))
+				return
+			money -= COST_PARKING_TILE
+			grid.place_parking(cell)
+			if not grid.is_road_served(cell):
+				add_log("Car park built but has no road to it — handles nobody yet.")
 
 		Tool.DEMOLISH:
 			var preview := grid.demolish_preview(cell)
@@ -1496,6 +1550,10 @@ func tile_cost(type: int) -> int:
 			return COST_GATE_TILE
 		AirportGrid.TileType.TERMINAL:
 			return COST_TERMINAL_TILE
+		AirportGrid.TileType.ROAD:
+			return COST_ROAD_TILE
+		AirportGrid.TileType.PARKING:
+			return COST_PARKING_TILE
 	return 0
 
 
@@ -1830,13 +1888,16 @@ func _update_ops_ui() -> void:
 	day_label.text = "Day %d · %ds to close%s" % [day, left, wx_txt]
 	day_label.modulate = Color(1.0, 0.72, 0.35) if not weather.is_empty() else Color.WHITE
 
-	capacity_label.text = "Airborne %d/%d · Crew %d/%d · Fuel %d/%d\nTerminal %d/%d · Checks %d/%d\nUpkeep %s/day\nLast day: %s in, %s out" % [
+	var stranded := grid.count_tiles(AirportGrid.TileType.TERMINAL, false) \
+		- grid.count_tiles(AirportGrid.TileType.TERMINAL, true)
+	var road_note := "" if stranded == 0 else "  !! %d concourse unroaded" % stranded
+	capacity_label.text = "Airborne %d/%d · Crew %d/%d · Fuel %d/%d\nPax %d/%d · Checks %d/%d\nUpkeep %s/day%s\nLast day: %s in, %s out" % [
 		airborne_count(), effective_air_capacity(),
 		used["crew"], capacity("crew"),
 		used["fuel"], capacity("fuel"),
 		used["term"], capacity("term"),
 		used["mech"], capacity("mech"),
-		money_str(total_upkeep()),
+		money_str(total_upkeep()), road_note,
 		money_str(last_day_revenue), money_str(last_upkeep),
 	]
 
@@ -1997,6 +2058,12 @@ func _update_hud() -> void:
 		Tool.TERMINAL:
 			hint_label.text = "CONCOURSE — click to build. Stands touching one\nget a jet bridge; the rest have to bus passengers."
 			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_TERMINAL_TILE), TERM_UNITS_PER_TILE]
+		Tool.ROAD:
+			hint_label.text = "ROAD — click or drag. Must reach the map edge\nto bring passengers in."
+			tool_info_label.text = "%s per tile" % money_str(COST_ROAD_TILE)
+		Tool.PARKING:
+			hint_label.text = "CAR PARK — click to build beside a road.\nAdds passenger capacity."
+			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_PARKING_TILE), PARK_UNITS_PER_TILE]
 		Tool.DEMOLISH:
 			hint_label.text = "DEMOLISH — click to remove.\nOccupied gates and runways can't be removed."
 			tool_info_label.text = "Refunds %d%%" % int(REFUND_RATE * 100)
@@ -2019,6 +2086,17 @@ func _draw() -> void:
 			AirportGrid.TileType.TERMINAL:
 				_draw_tile(cell, Color(0.36, 0.33, 0.45))
 				draw_rect(_cell_rect(cell), Color(0.62, 0.58, 0.78), false, 1.5)
+			AirportGrid.TileType.ROAD:
+				_draw_tile(cell, Color(0.24, 0.24, 0.26))
+				var mid := grid.cell_to_world(cell)
+				draw_line(mid - Vector2(0, 5), mid + Vector2(0, 5), Color(0.85, 0.8, 0.4, 0.7), 1.0)
+			AirportGrid.TileType.PARKING:
+				_draw_tile(cell, Color(0.30, 0.31, 0.33))
+				var r := _cell_rect(cell).grow(-4.0)
+				# Bay markings, so a car park reads differently from taxiway at a glance.
+				for i in 3:
+					var x := r.position.x + r.size.x * (float(i) + 0.5) / 3.0
+					draw_line(Vector2(x, r.position.y), Vector2(x, r.end.y), Color(0.75, 0.75, 0.8, 0.5), 1.0)
 
 	for r in grid.runways:
 		_draw_runway(r)
@@ -2207,6 +2285,10 @@ func _draw_ghost() -> void:
 			ok = grid.can_place_taxiway(hover_cell) and money >= COST_TAXIWAY
 		Tool.TERMINAL:
 			ok = grid.can_place_terminal(hover_cell) and money >= COST_TERMINAL_TILE
+		Tool.ROAD:
+			ok = grid.can_place_road(hover_cell) and money >= COST_ROAD_TILE
+		Tool.PARKING:
+			ok = grid.can_place_parking(hover_cell) and money >= COST_PARKING_TILE
 		Tool.GATE_SMALL, Tool.GATE_LARGE:
 			var size := tool_gate_size()
 			cells = grid.gate_cells_for(hover_cell, size)

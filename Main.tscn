@@ -97,7 +97,7 @@ text = "Select a holding plane, then a free stand."
 [node name="SelectBtn" type="Button" parent="UI"]
 offset_left = 10.0
 offset_top = 680.0
-offset_right = 110.0
+offset_right = 98.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -106,9 +106,9 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Select"
 
 [node name="TaxiwayBtn" type="Button" parent="UI"]
-offset_left = 116.0
+offset_left = 104.0
 offset_top = 680.0
-offset_right = 216.0
+offset_right = 192.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -116,9 +116,9 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Taxiway"
 
 [node name="RunwayBtn" type="Button" parent="UI"]
-offset_left = 222.0
+offset_left = 198.0
 offset_top = 680.0
-offset_right = 322.0
+offset_right = 286.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -126,9 +126,9 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Runway"
 
 [node name="GateSmallBtn" type="Button" parent="UI"]
-offset_left = 328.0
+offset_left = 292.0
 offset_top = 680.0
-offset_right = 428.0
+offset_right = 380.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -136,9 +136,9 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Stand S"
 
 [node name="GateLargeBtn" type="Button" parent="UI"]
-offset_left = 434.0
+offset_left = 386.0
 offset_top = 680.0
-offset_right = 534.0
+offset_right = 474.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -146,19 +146,39 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Stand W"
 
 [node name="TerminalBtn" type="Button" parent="UI"]
-offset_left = 540.0
+offset_left = 480.0
 offset_top = 680.0
-offset_right = 640.0
+offset_right = 568.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
 text = "Concourse"
 
-[node name="DemolishBtn" type="Button" parent="UI"]
-offset_left = 646.0
+[node name="RoadBtn" type="Button" parent="UI"]
+offset_left = 574.0
 offset_top = 680.0
-offset_right = 746.0
+offset_right = 662.0
+offset_bottom = 712.0
+focus_mode = 0
+toggle_mode = true
+button_group = SubResource("ButtonGroup_tools")
+text = "Road"
+
+[node name="ParkingBtn" type="Button" parent="UI"]
+offset_left = 668.0
+offset_top = 680.0
+offset_right = 756.0
+offset_bottom = 712.0
+focus_mode = 0
+toggle_mode = true
+button_group = SubResource("ButtonGroup_tools")
+text = "Car Park"
+
+[node name="DemolishBtn" type="Button" parent="UI"]
+offset_left = 762.0
+offset_top = 680.0
+offset_right = 850.0
 offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
@@ -166,7 +186,7 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Demolish"
 
 [node name="ToolInfoLabel" type="Label" parent="UI"]
-offset_left = 756.0
+offset_left = 858.0
 offset_top = 684.0
 offset_right = 1090.0
 offset_bottom = 706.0

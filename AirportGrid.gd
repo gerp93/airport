@@ -1,6 +1,6 @@
 extends RefCounted
 
-enum TileType { EMPTY, TAXIWAY, RUNWAY, GATE, TERMINAL }
+enum TileType { EMPTY, TAXIWAY, RUNWAY, GATE, TERMINAL, ROAD, PARKING }
 
 const COLS := 32
 const ROWS := 18
@@ -17,6 +17,8 @@ var gates: Array = []
 
 var _astar := AStarGrid2D.new()
 var _runway_seq := 0
+var _landside_dirty := true
+var _landside_cache := {}
 var _gate_seq := 0
 
 
@@ -75,8 +77,10 @@ func is_navigable(c: Vector2i) -> bool:
 
 func _refresh_cell(c: Vector2i) -> void:
 	var t := tile_type(c)
-	# Terminals are buildings, so aircraft route around them like open ground.
-	_astar.set_point_solid(c, t == TileType.EMPTY or t == TileType.TERMINAL)
+	# Terminals, roads and car parks are landside: aircraft route around them.
+	_astar.set_point_solid(c, t == TileType.EMPTY or t == TileType.TERMINAL \
+		or t == TileType.ROAD or t == TileType.PARKING)
+	_landside_dirty = true
 	_astar.set_point_weight_scale(c, RUNWAY_WEIGHT if t == TileType.RUNWAY else 1.0)
 
 
@@ -97,6 +101,70 @@ func can_place_terminal(c: Vector2i) -> bool:
 
 func place_terminal(c: Vector2i) -> void:
 	tiles[c] = {"type": TileType.TERMINAL, "entity_id": -1}
+	_refresh_cell(c)
+
+
+# Roads carry passengers in from outside, so the network only counts if it
+# reaches the map edge. Flood from every road tile on the boundary; a concourse
+# or car park is live only if it touches that network. An airport with no road
+# access handles nobody, however much terminal it has built.
+func landside_roads() -> Dictionary:
+	if not _landside_dirty:
+		return _landside_cache
+	var reached := {}
+	var queue := []
+	for c in tiles:
+		if tiles[c]["type"] != TileType.ROAD:
+			continue
+		if c.x == 0 or c.y == 0 or c.x == COLS - 1 or c.y == ROWS - 1:
+			reached[c] = true
+			queue.append(c)
+	while not queue.is_empty():
+		var cur: Vector2i = queue.pop_back()
+		for n in neighbors(cur):
+			if reached.has(n) or tile_type(n) != TileType.ROAD:
+				continue
+			reached[n] = true
+			queue.append(n)
+	_landside_cache = reached
+	_landside_dirty = false
+	return reached
+
+
+func is_road_served(c: Vector2i) -> bool:
+	var roads := landside_roads()
+	for n in neighbors(c):
+		if roads.has(n):
+			return true
+	return false
+
+
+func count_tiles(type: int, road_served_only: bool) -> int:
+	var n := 0
+	for c in tiles:
+		if tiles[c]["type"] != type:
+			continue
+		if road_served_only and not is_road_served(c):
+			continue
+		n += 1
+	return n
+
+
+func can_place_road(c: Vector2i) -> bool:
+	return in_bounds(c) and tile_type(c) == TileType.EMPTY
+
+
+func place_road(c: Vector2i) -> void:
+	tiles[c] = {"type": TileType.ROAD, "entity_id": -1}
+	_refresh_cell(c)
+
+
+func can_place_parking(c: Vector2i) -> bool:
+	return in_bounds(c) and tile_type(c) == TileType.EMPTY
+
+
+func place_parking(c: Vector2i) -> void:
+	tiles[c] = {"type": TileType.PARKING, "entity_id": -1}
 	_refresh_cell(c)
 
 
@@ -512,7 +580,7 @@ func demolish_preview(c: Vector2i) -> Dictionary:
 	match t:
 		TileType.EMPTY:
 			return {}
-		TileType.TAXIWAY, TileType.TERMINAL:
+		TileType.TAXIWAY, TileType.TERMINAL, TileType.ROAD, TileType.PARKING:
 			if claims.has(c):
 				return {}
 			return {"type": t, "tiles": 1, "cells": [c]}
@@ -604,3 +672,10 @@ func seed_starter_airport() -> void:
 		place_gate(gate_cells_for(Vector2i(x, 6), 1), 1)
 		# Concourse behind each stand, so they start as contact stands.
 		place_terminal(Vector2i(x, 5))
+
+	# Access road out to the northern boundary, plus a small car park. Without
+	# a road to the edge the concourse would handle no passengers at all.
+	for y in range(0, 5):
+		place_road(Vector2i(13, y))
+	place_parking(Vector2i(12, 3))
+	place_parking(Vector2i(14, 3))
