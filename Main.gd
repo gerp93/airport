@@ -132,6 +132,13 @@ const HUB_BREAK_REP := 20
 const ARRIVAL_GRACE := 40.0
 const REP_TURNED_AWAY := 7
 
+# Aircraft bound elsewhere that have to come here instead. They pay well over
+# list and earn goodwill if handled, but losing one is far worse than losing a
+# scheduled flight — and they arrive whether or not you have room.
+const EMERGENCY_RATE := 1.6
+const REP_EMERGENCY_LOST := 22
+const REP_EMERGENCY_HANDLED := 4
+
 const SPAWN_POS := Vector2(-60.0, 150.0)
 const AIR_ANCHOR := Vector2(110.0, 160.0)
 
@@ -166,6 +173,7 @@ var routes: Array = []
 var arrival_queue: Array = []
 var hub_airline := ""
 var next_offer_at := 25.0
+var next_emergency_at := 130.0
 
 # Setup runs before the simulation: 0 picks a continent, 1 picks a region, 2 plays.
 var setup_stage := 0
@@ -762,11 +770,46 @@ func spawn_flight(airline: String, size: int, origin: Array, rate: float, kind: 
 		"orbit_phase": randf() * TAU, "orbit_radius": 26.0 + randf() * 26.0,
 		"service_wait": 0.0, "delay_logged": false, "holds": {},
 		"wants_check": randf() < MAINT_CHANCE,
+		"emergency": kind == "emergency",
 	})
-	add_log("%s inbound from %s — %s, fee %s." % [
-		callsign, origin[0], cls["name"], money_str(payout),
-	])
+	if kind == "emergency":
+		# Give them more patience than a scheduled flight: they have nowhere else
+		# to go, so the drama is whether you can clear space in time.
+		planes[-1]["max_air_hold"] = 45.0
+		planes[-1]["max_hold"] = 32.0
+		add_log("EMERGENCY — %s diverted to us from %s (%s). Needs priority." % [
+			callsign, origin[1], cls["name"],
+		])
+	else:
+		add_log("%s inbound from %s — %s, fee %s." % [
+			callsign, origin[0], cls["name"], money_str(payout),
+		])
 	plane_id_seq += 1
+
+
+# Emergencies ignore the tower cap and any closure, because an aircraft
+# declaring one is landing regardless of what the schedule says. Bad weather
+# makes them more likely — other airports in the region are shut too.
+func update_emergencies() -> void:
+	if region.is_empty() or time_elapsed < next_emergency_at:
+		return
+	# Only divert aircraft the airport could physically take. A widebody landing
+	# at a field with no widebody stand is an unwinnable dice roll, not a test —
+	# the challenge should be clearing space in time, not the class lottery.
+	var options := []
+	for i in CLASSES.size():
+		if can_handle_class(i):
+			options.append(i)
+	if options.is_empty():
+		return
+	spawn_flight(
+		AIRLINES[randi() % AIRLINES.size()], options[randi() % options.size()],
+		random_origin(), EMERGENCY_RATE, "emergency"
+	)
+	var gap := 130.0 + randf() * 130.0
+	if not weather.is_empty():
+		gap *= 0.55
+	next_emergency_at = time_elapsed + gap
 
 
 # Unscheduled walk-in traffic, so an airport with no routes still has something
@@ -882,7 +925,9 @@ func release_plane(p: Dictionary) -> void:
 
 func divert(p: Dictionary, reason: String, rep_cost: int) -> void:
 	var cost := rep_cost
-	if wx_closed():
+	if p.get("emergency", false):
+		cost = REP_EMERGENCY_LOST
+	elif wx_closed():
 		cost = maxi(1, rep_cost / 2)
 	reputation = max(0, reputation - cost)
 	diverted += 1
@@ -974,12 +1019,15 @@ func runway_has_waiting_departure(runway_id: int) -> bool:
 # Arrivals must not starve departures: a plane already holding short goes first,
 # otherwise a steady arrival stream traps outbound traffic until it gets towed.
 func find_arrival_runway(p: Dictionary) -> Variant:
-	if wx_closed():
+	var emerg: bool = p.get("emergency", false)
+	if wx_closed() and not emerg:
 		return null
 	for r in grid.runways:
 		if not runway_fits(r, p):
 			continue
-		if grid.runway_is_clear(r) and not runway_has_waiting_departure(r["id"]):
+		if not grid.runway_is_clear(r):
+			continue
+		if emerg or not runway_has_waiting_departure(r["id"]):
 			return r
 	return null
 
@@ -1161,7 +1209,11 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				earned += take
 				day_revenue += take
 				served += 1
-				reputation = min(REP_MAX, reputation + REP_PER_TURNAROUND)
+				var rep_gain := REP_PER_TURNAROUND
+				if p.get("emergency", false):
+					rep_gain = REP_EMERGENCY_HANDLED
+					add_log("%s emergency handled. Reputation +%d." % [p["callsign"], rep_gain])
+				reputation = min(REP_MAX, reputation + rep_gain)
 				add_log("%s turnaround complete. +%s" % [p["callsign"], money_str(take)])
 				release_service(p)
 				p["state"] = "AWAIT_DEPART"
@@ -1475,6 +1527,7 @@ func _simulate(dt: float) -> void:
 		day_time -= DAY_LENGTH
 		end_of_day()
 	update_weather()
+	update_emergencies()
 	update_offers()
 	process_scheduled_arrivals()
 
@@ -1897,6 +1950,9 @@ func _draw_plane(p: Dictionary) -> void:
 			color = Color(0.26, 0.77, 0.96)
 	if p["blocked_timer"] > 1.0:
 		color = Color(0.95, 0.35, 0.35)
+	# An emergency has to be findable at a glance, so it overrides state colour.
+	if p.get("emergency", false) and p["state"] != "AT_GATE":
+		color = Color(1.0, 0.25, 0.55)
 	if selected_plane_id == p["id"]:
 		color = Color(1.0, 0.37, 0.82)
 
@@ -1913,6 +1969,8 @@ func _draw_plane(p: Dictionary) -> void:
 	]), color)
 
 	var label: String = "%s [%s]" % [p["callsign"], class_of(p)["code"]]
+	if p.get("emergency", false):
+		label = "!! " + label
 	match p["state"]:
 		"AIR_HOLD":
 			label += " (circling)"
