@@ -49,18 +49,26 @@ overhead:
 
 | Facility | Capacity per unit | Cost | Upkeep/day |
 |---|---|---|---|
-| Control Tower | 3 aircraft airborne | $35.0M | $9,000 |
+| Control Tower | 4 aircraft airborne | $28.0M | $9,000 |
 | Ground Crew Team | 2 turnarounds | $1.5M | $3,200 |
 | Fuel Truck | 2 refuels | $600k | $900 |
-| Terminal Wing | 6 passenger units | $55.0M | $18,000 |
 | Maintenance Hangar | 1 check | $22.0M | $7,500 |
+
+Passenger capacity is not bought here — it comes from **concourse and car park
+tiles you place**, which is why terminal layout is a build decision rather than
+a number.
 
 The **tower** is the throttle on inbound volume — it caps how many aircraft can
 be in the air at once, so accepting more flights means buying more tower.
-A turnaround needs a **crew** and a **fuel truck**, plus **terminal** capacity
+A turnaround needs a **crew** and a **fuel truck**, plus **passenger** capacity
 weighted by class (a widebody consumes three times a regional's share).
 Aircraft that park with no support free sit in `AWAIT_SERVICE` and bleed
-reputation, so under-building ground ops shows up as delays.
+reputation, naming whichever resource is actually short — so under-building
+ground ops shows up as delays that tell you what to fix.
+
+A stand touching a concourse is a **contact stand** with a jet bridge. One that
+isn't still works, but every passenger has to be bussed out to it, which makes
+the turnaround 40% longer.
 
 The **maintenance hangar** is upside rather than another penalty: ~12% of
 flights want a line check and pay a bonus if you can service it.
@@ -121,10 +129,37 @@ rather than a plane landing with nowhere to park.
 |---|---|---|---|
 | Select | Esc | — | Click an aircraft to draw its route; click a free stand to assign a holding one |
 | Taxiway | T | $500k/tile | Click or drag to paint |
-| Runway | R | $1.5M/tile | Drag a straight line; live length readout while dragging |
+| Runway | R | $1.5M/tile | Drag **any angle**; live length, heading and cost while dragging |
 | Stand S | G | $4.5M | 1 tile — Regional and Narrowbody |
 | Stand W | H | $9.0M | 2 tiles — anything |
+| Concourse | E | $18M | Stands touching one get a jet bridge |
+| Road | O | $400k/tile | Must reach the map edge to bring passengers in |
+| Car Park | P | $6.0M | Adds passenger capacity; needs a road beside it |
 | Demolish | X | recovers 50% | Removes a whole runway at once |
+
+### Runways
+
+Runways are free-angle segments, not rows of tiles, so any heading is
+buildable. They are designated by approach heading in tens of degrees the way
+real ones are — an east-west strip is 09/27, a 117° strip is 12/30 — and
+parallel runways sharing a heading take mirrored L/C/R suffixes, so 09L reads as
+27R from the other end.
+
+Lengthen an existing runway by dragging outward from either end; the new pavement
+is projected onto the existing axis so it can never bend, and the readout shows
+the finished length so you can see a class threshold coming.
+
+Runways work in both directions, so aircraft depart from whichever end they are
+already near. A runway with only one taxiway access point will gridlock, because
+every arrival and departure has to funnel through the same tile — build more
+than one exit.
+
+### Landside
+
+A road network only counts if it **reaches the map edge**. A concourse or car
+park is live only if it touches that network, so an airport with no road access
+handles no passengers however much terminal it has built. Passenger capacity is
+the sum of road-served concourse and parking.
 
 Capital costs are real 2020s figures — runway pavement at roughly $2,500 per
 linear foot, a stand with a jet bridge at $4.5M, an ATC tower at $35M.
