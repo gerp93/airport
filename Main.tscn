@@ -1,4 +1,4 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://Main.gd" id="1_main"]
 
@@ -17,6 +17,11 @@ corner_radius_top_left = 6
 corner_radius_top_right = 6
 corner_radius_bottom_right = 6
 corner_radius_bottom_left = 6
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_sidebar"]
+bg_color = Color(0.07, 0.09, 0.11, 0.9)
+border_width_left = 1
+border_color = Color(0.35, 0.45, 0.4, 1)
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_restart"]
 bg_color = Color(0.16, 0.42, 0.24, 1)
@@ -179,7 +184,61 @@ offset_top = 610.0
 offset_right = 995.0
 offset_bottom = 632.0
 horizontal_alignment = 2
+clip_text = true
 text = "Click a plane to inspect its route."
+
+[node name="ContractPanel" type="Panel" parent="UI"]
+offset_left = 1024.0
+offset_top = 88.0
+offset_right = 1280.0
+offset_bottom = 600.0
+theme_override_styles/panel = SubResource("StyleBoxFlat_sidebar")
+
+[node name="Title" type="Label" parent="UI/ContractPanel"]
+offset_left = 12.0
+offset_top = 8.0
+offset_right = 244.0
+offset_bottom = 30.0
+theme_override_font_sizes/font_size = 15
+text = "CONTRACTS"
+
+[node name="OfferLabel" type="Label" parent="UI/ContractPanel"]
+offset_left = 12.0
+offset_top = 36.0
+offset_right = 244.0
+offset_bottom = 200.0
+theme_override_font_sizes/font_size = 13
+autowrap_mode = 2
+vertical_alignment = 0
+text = ""
+
+[node name="AcceptBtn" type="Button" parent="UI/ContractPanel"]
+visible = false
+offset_left = 12.0
+offset_top = 204.0
+offset_right = 124.0
+offset_bottom = 234.0
+focus_mode = 0
+text = "Sign (A)"
+
+[node name="DeclineBtn" type="Button" parent="UI/ContractPanel"]
+visible = false
+offset_left = 132.0
+offset_top = 204.0
+offset_right = 244.0
+offset_bottom = 234.0
+focus_mode = 0
+text = "Pass (D)"
+
+[node name="ActiveLabel" type="Label" parent="UI/ContractPanel"]
+offset_left = 12.0
+offset_top = 246.0
+offset_right = 244.0
+offset_bottom = 500.0
+theme_override_font_sizes/font_size = 13
+autowrap_mode = 2
+vertical_alignment = 0
+text = ""
 
 [node name="GameOverPanel" type="Panel" parent="UI"]
 visible = false

@@ -2,7 +2,7 @@ extends RefCounted
 
 enum TileType { EMPTY, TAXIWAY, RUNWAY, GATE }
 
-const COLS := 40
+const COLS := 32
 const ROWS := 16
 const TILE := 32.0
 const ORIGIN := Vector2(0.0, 88.0)

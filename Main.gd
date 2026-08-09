@@ -50,6 +50,11 @@ const MAX_BLOCK_TIME := 20.0
 const REP_PER_TURNAROUND := 1
 const REP_MAX := 100
 
+const MAX_CONTRACTS := 2
+# Signed contracts generate their own traffic, so taking one you can't handle
+# actively floods the airport instead of just sitting in a list.
+const CONTRACT_TRAFFIC_SHARE := 0.6
+
 const SPAWN_POS := Vector2(-60.0, 150.0)
 const AIR_ANCHOR := Vector2(110.0, 160.0)
 
@@ -68,8 +73,13 @@ var log_lines: Array = []
 
 var paused := false
 var speed := 1.0
-# Mirrors the log to stdout for headless balance runs: --headless ... -- --echo-log
+# Test affordances for headless balance runs: --headless ... -- --echo-log --auto-sign
 var _echo_log := false
+var _auto_sign := false
+
+var offer = null
+var contracts: Array = []
+var next_offer_at := 25.0
 
 var selected_plane_id := -1
 var tool: Tool = Tool.SELECT
@@ -88,7 +98,9 @@ var is_dragging := false
 
 func _ready() -> void:
 	randomize()
-	_echo_log = "--echo-log" in OS.get_cmdline_user_args()
+	var args := OS.get_cmdline_user_args()
+	_echo_log = "--echo-log" in args
+	_auto_sign = "--auto-sign" in args
 	grid = AirportGrid.new()
 	grid.seed_starter_airport()
 
@@ -104,6 +116,8 @@ func _ready() -> void:
 	$UI/Speed2Btn.pressed.connect(_set_speed.bind(2.0))
 	$UI/Speed3Btn.pressed.connect(_set_speed.bind(4.0))
 	$UI/GameOverPanel/RestartBtn.pressed.connect(func(): get_tree().reload_current_scene())
+	$UI/ContractPanel/AcceptBtn.pressed.connect(accept_offer)
+	$UI/ContractPanel/DeclineBtn.pressed.connect(decline_offer)
 
 	add_log("Airport open. Build taxiways to connect runways and gates.")
 
@@ -179,9 +193,105 @@ func pick_size() -> int:
 	return 0
 
 
+# --- contracts ---
+
+func can_handle_class(size: int) -> bool:
+	var need: Dictionary = CLASSES[size]
+	var runway_ok := false
+	for r in grid.runways:
+		if grid.runway_is_usable(r) and r["cells"].size() >= need["min_runway"]:
+			runway_ok = true
+			break
+	if not runway_ok:
+		return false
+	for g in grid.gates:
+		if grid.gate_is_connected(g) and g["size"] >= need["gate_size"]:
+			return true
+	return false
+
+
+func make_offer() -> Dictionary:
+	var size := pick_size()
+	var count := 3 + randi() % 4
+	var cls: Dictionary = CLASSES[size]
+	var per: int = (cls["pay_min"] + cls["pay_max"]) / 2
+	return {
+		"airline": AIRLINES[randi() % AIRLINES.size()],
+		"size": size, "count": count, "progress": 0,
+		"reward": int(per * count * 0.6),
+		"penalty": 8 + count * 2,
+		"duration": 70.0 + count * 28.0,
+		"deadline": 0.0,
+	}
+
+
+func accept_offer() -> void:
+	if offer == null or contracts.size() >= MAX_CONTRACTS:
+		return
+	offer["deadline"] = time_elapsed + offer["duration"]
+	contracts.append(offer)
+	add_log("Signed %s: %d %s flights in %ds for $%d." % [
+		offer["airline"], offer["count"], CLASSES[offer["size"]]["name"],
+		int(offer["duration"]), offer["reward"],
+	])
+	offer = null
+	next_offer_at = time_elapsed + 45.0 + randf() * 30.0
+
+
+func decline_offer() -> void:
+	if offer == null:
+		return
+	add_log("Passed on the %s contract." % offer["airline"])
+	offer = null
+	next_offer_at = time_elapsed + 25.0 + randf() * 20.0
+
+
+func contract_needing_traffic() -> Variant:
+	for c in contracts:
+		if c["progress"] < c["count"]:
+			return c
+	return null
+
+
+func credit_contracts(p: Dictionary) -> void:
+	for c in contracts:
+		if c["airline"] == p["airline"] and c["size"] == p["size"] and c["progress"] < c["count"]:
+			c["progress"] += 1
+			if c["progress"] >= c["count"]:
+				money += c["reward"]
+				earned += c["reward"]
+				reputation = min(REP_MAX, reputation + 5)
+				add_log("CONTRACT COMPLETE — %s. +$%d, Reputation +5." % [c["airline"], c["reward"]])
+			return
+
+
+func update_contracts() -> void:
+	for c in contracts:
+		if c["progress"] < c["count"] and time_elapsed >= c["deadline"]:
+			reputation = max(0, reputation - c["penalty"])
+			add_log("CONTRACT FAILED — %s, %d of %d flights. Reputation -%d." % [
+				c["airline"], c["progress"], c["count"], c["penalty"],
+			])
+			c["progress"] = -1
+	contracts = contracts.filter(func(c): return c["progress"] >= 0 and c["progress"] < c["count"])
+
+	if offer == null and contracts.size() < MAX_CONTRACTS and time_elapsed >= next_offer_at:
+		offer = make_offer()
+		add_log("%s is offering a contract." % offer["airline"])
+		if _auto_sign:
+			if can_handle_class(offer["size"]):
+				accept_offer()
+			else:
+				decline_offer()
+
+
 func spawn_plane() -> void:
 	var airline: String = AIRLINES[randi() % AIRLINES.size()]
 	var size := pick_size()
+	var contract = contract_needing_traffic()
+	if contract != null and randf() < CONTRACT_TRAFFIC_SHARE:
+		airline = contract["airline"]
+		size = contract["size"]
 	var cls: Dictionary = CLASSES[size]
 	var payout: int = cls["pay_min"] + randi() % (cls["pay_max"] - cls["pay_min"] + 1)
 	var callsign := "%s %d" % [airline, plane_id_seq]
@@ -569,6 +679,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				served += 1
 				reputation = min(REP_MAX, reputation + REP_PER_TURNAROUND)
 				add_log("%s turnaround complete. +$%d" % [p["callsign"], p["payout"]])
+				credit_contracts(p)
 				p["state"] = "AWAIT_DEPART"
 				p["state_timer"] = 0.0
 
@@ -745,6 +856,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_3:
 				_choose_speed(4.0)
 				return
+			KEY_A:
+				accept_offer()
+				return
+			KEY_D:
+				decline_offer()
+				return
 		if TOOL_KEYS.has(event.keycode):
 			_choose_tool(TOOL_KEYS[event.keycode])
 		return
@@ -813,6 +930,7 @@ func _process(delta: float) -> void:
 		if reputation <= 0:
 			_end_run()
 	_update_hud()
+	_update_contract_ui()
 	queue_redraw()
 
 
@@ -837,6 +955,7 @@ func _end_run() -> void:
 
 func _simulate(dt: float) -> void:
 	time_elapsed += dt
+	update_contracts()
 
 	if time_elapsed >= next_spawn_at:
 		spawn_plane()
@@ -859,6 +978,50 @@ func _class_requirements() -> String:
 	for c in CLASSES:
 		parts.append("%s %dt" % [c["code"], c["min_runway"]])
 	return "Needs: " + ", ".join(parts)
+
+
+func _update_contract_ui() -> void:
+	var offer_label: Label = $UI/ContractPanel/OfferLabel
+	var active_label: Label = $UI/ContractPanel/ActiveLabel
+	var full := contracts.size() >= MAX_CONTRACTS
+
+	if offer == null:
+		offer_label.text = "No offers right now.\n\nNext approach in %ds." % int(max(0.0, next_offer_at - time_elapsed))
+	else:
+		var cls: Dictionary = CLASSES[offer["size"]]
+		var lines := [
+			"%s wants a deal:" % offer["airline"],
+			"",
+			"%d x %s" % [offer["count"], cls["name"]],
+			"within %ds" % int(offer["duration"]),
+			"pays $%d bonus" % offer["reward"],
+			"fail: -%d reputation" % offer["penalty"],
+			"",
+			"Needs %dt runway + %s stand." % [cls["min_runway"], "widebody" if cls["gate_size"] >= 2 else "small"],
+		]
+		if not can_handle_class(offer["size"]):
+			lines.append("")
+			lines.append("!! Your airport cannot handle this yet.")
+		elif full:
+			lines.append("")
+			lines.append("!! Contract slots full.")
+		offer_label.text = "\n".join(lines)
+
+	$UI/ContractPanel/AcceptBtn.visible = offer != null
+	$UI/ContractPanel/DeclineBtn.visible = offer != null
+	$UI/ContractPanel/AcceptBtn.disabled = full
+
+	if contracts.is_empty():
+		active_label.text = "Signed: none."
+	else:
+		var parts := ["Signed:"]
+		for c in contracts:
+			parts.append("")
+			parts.append("%s — %d/%d %s" % [
+				c["airline"], c["progress"], c["count"], CLASSES[c["size"]]["code"],
+			])
+			parts.append("  %ds left · $%d" % [int(max(0.0, c["deadline"] - time_elapsed)), c["reward"]])
+		active_label.text = "\n".join(parts)
 
 
 func _update_hud() -> void:
@@ -891,7 +1054,7 @@ func _update_hud() -> void:
 	match tool:
 		Tool.SELECT:
 			hint_label.text = "SELECT — click a plane to see its route,\nthen click a free gate to assign it."
-			tool_info_label.text = "Build tools cost money; demolish refunds %d%%." % int(REFUND_RATE * 100)
+			tool_info_label.text = "Demolish refunds %d%%" % int(REFUND_RATE * 100)
 		Tool.TAXIWAY:
 			hint_label.text = "TAXIWAY — click or drag to paint.\nGates and runways need a taxiway connection."
 			tool_info_label.text = "$%d per tile" % COST_TAXIWAY
@@ -906,7 +1069,7 @@ func _update_hud() -> void:
 			tool_info_label.text = "$%d" % (COST_GATE_TILE * 2)
 		Tool.DEMOLISH:
 			hint_label.text = "DEMOLISH — click to remove.\nOccupied gates and runways can't be removed."
-			tool_info_label.text = "Refunds %d%% of build cost" % int(REFUND_RATE * 100)
+			tool_info_label.text = "Refunds %d%%" % int(REFUND_RATE * 100)
 
 
 # --- rendering ---
