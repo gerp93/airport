@@ -73,9 +73,14 @@ const DAY_LENGTH := 90.0
 # Facilities are bought in units; each unit adds concurrency and daily upkeep,
 # so scaling up traffic means scaling up overhead.
 const FACILITIES := [
+	# The tower is the throttle on all inbound volume, so at $35M for +3 it was
+	# 70 game-days of income away — the airport strangled long before it could
+	# afford to grow. $28M for +4 keeps it a real investment without making
+	# capacity unreachable, and is still squarely in the real range for a
+	# tower project.
 	{
-		"key": "tower", "name": "Control Tower", "cost": 35_000_000,
-		"upkeep": 9_000, "per_unit": 3, "unit": "airborne",
+		"key": "tower", "name": "Control Tower", "cost": 28_000_000,
+		"upkeep": 9_000, "per_unit": 4, "unit": "airborne",
 	},
 	{
 		"key": "crew", "name": "Ground Crew Team", "cost": 1_500_000,
@@ -111,7 +116,9 @@ const FLY_SPEED := 220.0
 const REPATH_INTERVAL := 1.5
 const MAX_BLOCK_TIME := 20.0
 # Reputation has to be recoverable, or the game is just a countdown to losing.
-const REP_PER_TURNAROUND := 1
+# At +1 a good day still lost ground to a handful of diversions, so serving
+# flights well never actually dug you out.
+const REP_PER_TURNAROUND := 2
 const REP_MAX := 100
 
 const SAVE_PATH := "user://airport_save.dat"
@@ -130,7 +137,7 @@ const HUB_BREAK_REP := 20
 # A scheduled flight you cannot fit is turned away, which is what
 # over-committing on routes actually costs.
 const ARRIVAL_GRACE := 40.0
-const REP_TURNED_AWAY := 7
+const REP_TURNED_AWAY := 5
 
 # Aircraft bound elsewhere that have to come here instead. They pay well over
 # list and earn goodwill if handled, but losing one is far worse than losing a
@@ -143,7 +150,8 @@ const SPAWN_POS := Vector2(-60.0, 150.0)
 const AIR_ANCHOR := Vector2(110.0, 160.0)
 
 var grid: AirportGrid
-var money := 15_000_000
+# Enough for two or three meaningful opening moves rather than exactly one.
+var money := 28_000_000
 var day := 1
 var day_time := 0.0
 var day_revenue := 0
@@ -609,6 +617,19 @@ func daily_route_flights() -> int:
 	return n
 
 
+# Airlines expand where they already operate. Without this the offer stream
+# spreads evenly across all five carriers and none ever reaches hub scale, so
+# the top relationship tier was effectively unreachable.
+func offering_airline() -> String:
+	var incumbents := []
+	for a in AIRLINES:
+		if not routes_for(a).is_empty():
+			incumbents.append(a)
+	if not incumbents.is_empty() and randf() < 0.65:
+		return incumbents[randi() % incumbents.size()]
+	return AIRLINES[randi() % AIRLINES.size()]
+
+
 func make_offer() -> Dictionary:
 	var cand := hub_candidate()
 	if cand != "" and randf() < 0.6:
@@ -624,12 +645,12 @@ func make_offer() -> Dictionary:
 
 	if randf() < 0.4:
 		return {
-			"kind": "charter", "airline": AIRLINES[randi() % AIRLINES.size()],
+			"kind": "charter", "airline": offering_airline(),
 			"origin": random_origin(), "size": pick_size(),
 			"rate": CHARTER_RATE, "per_day": 1,
 		}
 
-	var carrier: String = AIRLINES[randi() % AIRLINES.size()]
+	var carrier := offering_airline()
 	return {
 		"kind": "route", "airline": carrier,
 		"origin": fresh_origin_for(carrier), "size": pick_size(),
@@ -793,29 +814,56 @@ func spawn_flight(airline: String, size: int, origin: Array, rate: float, kind: 
 func update_emergencies() -> void:
 	if region.is_empty() or time_elapsed < next_emergency_at:
 		return
-	# Only divert aircraft the airport could physically take. A widebody landing
-	# at a field with no widebody stand is an unwinnable dice roll, not a test —
-	# the challenge should be clearing space in time, not the class lottery.
-	var options := []
-	for i in CLASSES.size():
-		if can_handle_class(i):
-			options.append(i)
-	if options.is_empty():
-		return
-	spawn_flight(
-		AIRLINES[randi() % AIRLINES.size()], options[randi() % options.size()],
-		random_origin(), EMERGENCY_RATE, "emergency"
-	)
+	# Reschedule first, so an airport that currently can't take anything doesn't
+	# re-run this check every frame.
 	var gap := 130.0 + randf() * 130.0
 	if not weather.is_empty():
 		gap *= 0.55
 	next_emergency_at = time_elapsed + gap
 
+	# Only divert aircraft the airport could physically take. A widebody landing
+	# at a field with no widebody stand is an unwinnable dice roll, not a test —
+	# the challenge should be clearing space in time, not the class lottery.
+	var size := pick_serviceable_size()
+	if size < 0:
+		return
+	spawn_flight(
+		AIRLINES[randi() % AIRLINES.size()], size,
+		random_origin(), EMERGENCY_RATE, "emergency"
+	)
+
 
 # Unscheduled walk-in traffic, so an airport with no routes still has something
 # to do. It thins out as contracted volume grows.
+func serviceable_sizes() -> Array:
+	var out := []
+	for i in CLASSES.size():
+		if can_handle_class(i):
+			out.append(i)
+	return out
+
+
+# Keeps the time-based fleet progression, but never sends an aircraft the
+# airport physically cannot serve. An airline doesn't schedule a widebody into a
+# field with a 9,600 ft runway, and docking the player 15 reputation for not
+# having built one yet is backwards — unmet widebody demand should show up as
+# route offers they can't accept, which is the real incentive to invest.
+func pick_serviceable_size() -> int:
+	var options := serviceable_sizes()
+	if options.is_empty():
+		return -1
+	for _attempt in 6:
+		var s := pick_size()
+		if options.has(s):
+			return s
+	return options[randi() % options.size()]
+
+
 func spawn_plane() -> void:
-	spawn_flight(AIRLINES[randi() % AIRLINES.size()], pick_size(), random_origin(), 1.0, "walk-in")
+	var size := pick_serviceable_size()
+	if size < 0:
+		return
+	spawn_flight(AIRLINES[randi() % AIRLINES.size()], size, random_origin(), 1.0, "walk-in")
 
 
 # --- movement primitives ---
@@ -1503,6 +1551,30 @@ func _end_run() -> void:
 	add_log("GAME OVER — reputation hit zero after %d:%02d." % [minutes, seconds])
 
 
+# The narrowest link in the chain from approach to stand: airborne slots,
+# connected stands, ground crews, terminal capacity. Everything downstream of
+# the tower matters, which is why buying tower capacity alone made things worse.
+func service_capacity() -> int:
+	var stands := 0
+	for g in grid.gates:
+		if grid.gate_is_connected(g):
+			stands += 1
+	return maxi(1, mini(
+		mini(stands, capacity("crew")),
+		mini(capacity("term") / 2, effective_air_capacity())
+	))
+
+
+# Walk-in demand follows capacity rather than a fixed clock. Previously the ramp
+# tightened to a flight every 3-6s within five minutes whether or not the player
+# had built anything, so a starter airport was flooded by the calendar and lost
+# before it could grow. Now growing the airport is what invites more traffic,
+# and deliberate pressure comes from routes you signed, weather, and emergencies.
+func walkin_gap() -> float:
+	var ramp: float = clampf(1.0 - time_elapsed / 600.0, 0.75, 1.0)
+	return clampf(26.0 / float(service_capacity()) * ramp, 3.5, 14.0)
+
+
 # The tower caps concurrent airborne traffic, so tower capacity is the thing
 # that decides how many inbound flights the airport can accept at all.
 func _try_spawn() -> void:
@@ -1513,11 +1585,8 @@ func _try_spawn() -> void:
 		next_spawn_at = time_elapsed + 2.0
 		return
 	spawn_plane()
-	# Ramp over 5 minutes so rising traffic tracks the fleet getting heavier.
-	var tightness: float = max(0.0, 1.0 - time_elapsed / 300.0)
-	var min_gap := 3.0 + 3.0 * tightness
-	var max_gap := 6.0 + 4.0 * tightness
-	next_spawn_at = time_elapsed + min_gap + randf() * (max_gap - min_gap)
+	var gap := walkin_gap()
+	next_spawn_at = time_elapsed + gap * (0.75 + randf() * 0.5)
 
 
 func _simulate(dt: float) -> void:

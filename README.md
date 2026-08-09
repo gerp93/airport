@@ -216,12 +216,23 @@ Still a prototype:
   crosswind weather closes short runways rather than favouring an alignment.
 - Weather is a single global condition, not a front that moves through.
 
-Known balance gap: **the hub tier is hard to reach in practice.** An unattended
-run ends before a second carrier can qualify, and reaching a hub needs three
-routes from one airline plus the tower capacity to fly them. Verifying the
-hub-switch penalty required temporarily loosening `HUB_ROUTE_REQ` and starting
-reputation. The long-arc content probably needs either a gentler reputation
-curve or a longer runway of days to unfold in.
+**Demand follows capacity, not a clock.** Walk-in traffic scales with the
+narrowest link in your chain — airborne slots, connected stands, ground crews,
+terminal capacity — so growing the airport is what invites more traffic. An
+earlier version tightened arrivals to one flight every 3-6s within five minutes
+whether or not you had built anything, which flooded a starter airport by the
+calendar. Deliberate pressure now comes from routes you signed, weather, and
+emergencies.
+
+Walk-in traffic and emergencies only bring aircraft classes the airport can
+physically serve. Unmet widebody demand appears as route offers you can't
+accept yet — that is the incentive to build a longer runway, rather than
+reputation damage for not having built it already. Routes are the exception: if
+you sign a widebody route you can't serve, you were warned, and you pay for it.
+
+With that in place a passive airport now survives indefinitely but never grows;
+losing comes from over-committing on routes. Whether that trade feels right is
+the main thing still needing real play.
 
 Natural next steps: splitting aircraft and stands into scenes with
 `AnimatedSprite2D` when real art exists, runway direction and wind, de-icing as
