@@ -1,6 +1,6 @@
 # VENDORED from gerp93/KVG_Standards — do not edit here.
 #   source: packages/godot/kvg_update/kvg_update.gd
-#   commit: 66c787e
+#   commit: c5191e4
 # Godot has no dependency manager that can pin a git ref, so this is copied in
 # rather than pinned. Refresh it with scripts/update-kvg-update.sh and update
 # the commit above; fix bugs upstream in KVG_Standards, not in this copy.
