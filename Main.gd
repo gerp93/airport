@@ -4,6 +4,15 @@ const AirportGrid = preload("res://AirportGrid.gd")
 
 enum Tool { SELECT, TAXIWAY, RUNWAY, GATE, DEMOLISH }
 
+const TOOL_BUTTONS := {
+	Tool.SELECT: "SelectBtn", Tool.TAXIWAY: "TaxiwayBtn", Tool.RUNWAY: "RunwayBtn",
+	Tool.GATE: "GateBtn", Tool.DEMOLISH: "DemolishBtn",
+}
+const TOOL_KEYS := {
+	KEY_ESCAPE: Tool.SELECT, KEY_T: Tool.TAXIWAY, KEY_R: Tool.RUNWAY,
+	KEY_G: Tool.GATE, KEY_X: Tool.DEMOLISH,
+}
+
 const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
 
 const COST_TAXIWAY := 15
@@ -32,6 +41,9 @@ var plane_id_seq := 1
 var planes: Array = []
 var log_lines: Array = []
 
+var paused := false
+var speed := 1.0
+
 var selected_plane_id := -1
 var tool: Tool = Tool.SELECT
 var hover_cell := AirportGrid.NOWHERE
@@ -58,7 +70,40 @@ func _ready() -> void:
 	$UI/GateBtn.pressed.connect(_set_tool.bind(Tool.GATE))
 	$UI/DemolishBtn.pressed.connect(_set_tool.bind(Tool.DEMOLISH))
 
+	$UI/PauseBtn.toggled.connect(_on_pause_toggled)
+	$UI/Speed1Btn.pressed.connect(_set_speed.bind(1.0))
+	$UI/Speed2Btn.pressed.connect(_set_speed.bind(2.0))
+	$UI/Speed3Btn.pressed.connect(_set_speed.bind(4.0))
+
 	add_log("Airport open. Build taxiways to connect runways and gates.")
+
+
+func _on_pause_toggled(on: bool) -> void:
+	paused = on
+	$UI/PauseBtn.text = "Resume" if on else "Pause"
+
+
+func _set_speed(s: float) -> void:
+	speed = s
+	if paused:
+		$UI/PauseBtn.button_pressed = false
+
+
+# Keyboard shortcuts drive the same buttons the mouse does, so the toolbar always
+# shows the real state.
+func _choose_speed(s: float) -> void:
+	_set_speed(s)
+	var btn := "Speed1Btn"
+	if is_equal_approx(s, 2.0):
+		btn = "Speed2Btn"
+	elif is_equal_approx(s, 4.0):
+		btn = "Speed3Btn"
+	get_node("UI/" + btn).button_pressed = true
+
+
+func _choose_tool(t: Tool) -> void:
+	_set_tool(t)
+	get_node("UI/" + TOOL_BUTTONS[t]).button_pressed = true
 
 
 func _set_tool(t: Tool) -> void:
@@ -561,6 +606,24 @@ func tile_cost(type: int) -> int:
 # --- input ---
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_SPACE:
+				$UI/PauseBtn.button_pressed = not paused
+				return
+			KEY_1:
+				_choose_speed(1.0)
+				return
+			KEY_2:
+				_choose_speed(2.0)
+				return
+			KEY_3:
+				_choose_speed(4.0)
+				return
+		if TOOL_KEYS.has(event.keycode):
+			_choose_tool(TOOL_KEYS[event.keycode])
+		return
+
 	if event is InputEventMouseMotion:
 		hover_cell = grid.world_to_cell(event.position)
 		if is_dragging and tool == Tool.TAXIWAY:
@@ -618,7 +681,16 @@ func _handle_select_click(pos: Vector2, cell: Vector2i) -> void:
 # --- frame ---
 
 func _process(delta: float) -> void:
-	time_elapsed += delta
+	# Building stays fully usable while paused, so only the simulation is gated.
+	var dt := 0.0 if paused else delta * speed
+	if dt > 0.0:
+		_simulate(dt)
+	_update_hud()
+	queue_redraw()
+
+
+func _simulate(dt: float) -> void:
+	time_elapsed += dt
 
 	if time_elapsed >= next_spawn_at:
 		spawn_plane()
@@ -629,20 +701,18 @@ func _process(delta: float) -> void:
 
 	for p in planes:
 		if p["state"] != "REMOVE":
-			update_plane(p, delta)
+			update_plane(p, dt)
 	for p in planes:
 		if p["state"] == "REMOVE":
 			grid.release_all(p["id"])
 	planes = planes.filter(func(p): return p["state"] != "REMOVE")
 
-	_update_hud()
-	queue_redraw()
-
 
 func _update_hud() -> void:
 	money_label.text = "Money: $%d" % money
 	rep_label.text = "Reputation: %d" % reputation
-	next_in_label.text = "Next contract in: %.1fs" % max(0.0, next_spawn_at - time_elapsed)
+	var clock := "PAUSED" if paused else "%gx" % speed
+	next_in_label.text = "Next flight in: %.1fs   [%s]" % [max(0.0, next_spawn_at - time_elapsed), clock]
 
 	var usable_runways := 0
 	for r in grid.runways:
