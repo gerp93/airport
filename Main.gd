@@ -1,133 +1,298 @@
 extends Node2D
 
-const RUNWAY_X1 := 60.0
-const RUNWAY_X2 := 900.0
-const TAXI_X := RUNWAY_X1 + 260.0
-const RUNWAY_Y_SLOTS := [300.0, 380.0, 460.0]
-const GATE_SLOTS := [
-	Vector2(580, 120), Vector2(660, 120), Vector2(740, 120),
-	Vector2(580, 175), Vector2(660, 175), Vector2(740, 175),
-]
-const GATE_W := 60.0
-const GATE_H := 40.0
-const TERMINAL := Rect2(560, 90, 260, 145)
-const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
-const MAX_GATES := 6
-const MAX_RUNWAYS := 3
+const AirportGrid = preload("res://AirportGrid.gd")
 
+enum Tool { SELECT, TAXIWAY, RUNWAY, GATE, DEMOLISH }
+
+const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
+
+const COST_TAXIWAY := 15
+const COST_RUNWAY_TILE := 40
+const COST_GATE := 250
+const REFUND_RATE := 0.5
+const TOW_FEE := 60
+
+const TAXI_SPEED := 60.0
+const ROLLOUT_SPEED := 170.0
+const TAKEOFF_SPEED := 200.0
+const FLY_SPEED := 220.0
+
+const REPATH_INTERVAL := 1.5
+const MAX_BLOCK_TIME := 20.0
+
+const SPAWN_POS := Vector2(-60.0, 150.0)
+const AIR_ANCHOR := Vector2(110.0, 160.0)
+
+var grid: AirportGrid
 var money := 300
 var reputation := 100
 var time_elapsed := 0.0
-var next_spawn_at := 3.0
+var next_spawn_at := 5.0
 var plane_id_seq := 1
-var selected_plane_id = null
-
-var runways: Array = []
-var gates: Array = []
 var planes: Array = []
 var log_lines: Array = []
+
+var selected_plane_id := -1
+var tool: Tool = Tool.SELECT
+var hover_cell := AirportGrid.NOWHERE
+var drag_start := AirportGrid.NOWHERE
+var is_dragging := false
 
 @onready var money_label: Label = $UI/MoneyLabel
 @onready var rep_label: Label = $UI/RepLabel
 @onready var next_in_label: Label = $UI/NextInLabel
-@onready var build_gate_btn: Button = $UI/BuildGateBtn
-@onready var build_runway_btn: Button = $UI/BuildRunwayBtn
+@onready var stats_label: Label = $UI/StatsLabel
+@onready var hint_label: Label = $UI/HintLabel
+@onready var tool_info_label: Label = $UI/ToolInfoLabel
 @onready var log_label: RichTextLabel = $UI/LogLabel
 
 
 func _ready() -> void:
 	randomize()
-	runways.append({"id": 0, "y": RUNWAY_Y_SLOTS[0], "occupied": false})
-	for i in range(3):
-		gates.append({
-			"id": i, "x": GATE_SLOTS[i].x, "y": GATE_SLOTS[i].y,
-			"w": GATE_W, "h": GATE_H, "occupied": false,
-		})
-	build_gate_btn.pressed.connect(_on_build_gate_pressed)
-	build_runway_btn.pressed.connect(_on_build_runway_pressed)
-	add_log("Demo started. Watch for inbound flights.")
+	grid = AirportGrid.new()
+	grid.seed_starter_airport()
+
+	$UI/SelectBtn.pressed.connect(_set_tool.bind(Tool.SELECT))
+	$UI/TaxiwayBtn.pressed.connect(_set_tool.bind(Tool.TAXIWAY))
+	$UI/RunwayBtn.pressed.connect(_set_tool.bind(Tool.RUNWAY))
+	$UI/GateBtn.pressed.connect(_set_tool.bind(Tool.GATE))
+	$UI/DemolishBtn.pressed.connect(_set_tool.bind(Tool.DEMOLISH))
+
+	add_log("Airport open. Build taxiways to connect runways and gates.")
 
 
-func gate_cost() -> int:
-	return 250 + 150 * (gates.size() - 3)
-
-
-func runway_cost() -> int:
-	return 500 + 350 * (runways.size() - 1)
+func _set_tool(t: Tool) -> void:
+	tool = t
+	is_dragging = false
+	if t != Tool.SELECT:
+		selected_plane_id = -1
 
 
 func add_log(msg: String) -> void:
-	var t := "%.1f" % time_elapsed
-	log_lines.push_front("[%ss] %s" % [t, msg])
+	log_lines.push_front("[%.1fs] %s" % [time_elapsed, msg])
 	if log_lines.size() > 40:
 		log_lines.resize(40)
 	log_label.text = "\n".join(log_lines)
 
 
-func _on_build_gate_pressed() -> void:
-	if gates.size() >= MAX_GATES:
-		return
-	var cost := gate_cost()
-	if money < cost:
-		return
-	money -= cost
-	var slot: Vector2 = GATE_SLOTS[gates.size()]
-	gates.append({
-		"id": gates.size(), "x": slot.x, "y": slot.y,
-		"w": GATE_W, "h": GATE_H, "occupied": false,
-	})
-	add_log("Built Gate %d for $%d." % [gates.size(), cost])
+func find_plane(id: int) -> Variant:
+	for p in planes:
+		if p["id"] == id:
+			return p
+	return null
 
 
-func _on_build_runway_pressed() -> void:
-	if runways.size() >= MAX_RUNWAYS:
-		return
-	var cost := runway_cost()
-	if money < cost:
-		return
-	money -= cost
-	var y: float = RUNWAY_Y_SLOTS[runways.size()]
-	runways.append({"id": runways.size(), "y": y, "occupied": false})
-	add_log("Built Runway %d for $%d." % [runways.size(), cost])
-
+# --- spawning ---
 
 func spawn_plane() -> void:
 	var airline: String = AIRLINES[randi() % AIRLINES.size()]
 	var payout := 80 + randi() % 120
-	var plane := {
+	planes.append({
 		"id": plane_id_seq, "airline": airline, "payout": payout,
-		"state": "AIR_HOLD", "x": -40.0, "y": 40.0,
-		"runway": null, "gate": null,
-		"hold_timer": 0.0, "air_hold_timer": 0.0,
-		"max_hold": 18.0, "max_air_hold": 25.0,
+		"callsign": "%s %d" % [airline, plane_id_seq],
+		"state": "AIR_HOLD",
+		"pos": SPAWN_POS, "heading": 0.0,
+		"cell": AirportGrid.NOWHERE,
+		"runway_id": -1, "gate_id": -1,
+		"path": [], "path_index": 0,
+		"air_hold_timer": 0.0, "max_air_hold": 25.0,
+		"hold_timer": 0.0, "max_hold": 18.0,
+		"blocked_timer": 0.0, "repath_timer": 0.0,
 		"state_timer": 0.0, "turnaround": 6.0,
-	}
+	})
+	add_log("%s inbound (contract $%d)." % [planes[planes.size() - 1]["callsign"], payout])
 	plane_id_seq += 1
-	planes.append(plane)
-	add_log("%s flight inbound (contract $%d)." % [airline, payout])
 
 
-func assign_gate(plane: Dictionary, gate: Dictionary) -> void:
+# --- movement primitives ---
+
+func move_toward_point(p: Dictionary, target: Vector2, speed: float, dt: float) -> bool:
+	var delta: Vector2 = target - p["pos"]
+	var dist := delta.length()
+	if dist < 0.5:
+		p["pos"] = target
+		return true
+	p["heading"] = delta.angle()
+	var step := speed * dt
+	if step >= dist:
+		p["pos"] = target
+		return true
+	p["pos"] = p["pos"] + delta / dist * step
+	return false
+
+
+func set_path(p: Dictionary, path: Array) -> void:
+	p["path"] = path
+	p["path_index"] = 1 if not path.is_empty() and path[0] == p["cell"] else 0
+	p["blocked_timer"] = 0.0
+	p["repath_timer"] = 0.0
+
+
+func path_destination(p: Dictionary) -> Vector2i:
+	if p["path"].is_empty():
+		return AirportGrid.NOWHERE
+	return p["path"][p["path"].size() - 1]
+
+
+# "arrived" | "moving" | "blocked" | "lost"
+func advance_along_path(p: Dictionary, speed: float, dt: float) -> String:
+	if p["path_index"] >= p["path"].size():
+		return "arrived"
+	var next_cell: Vector2i = p["path"][p["path_index"]]
+	if not grid.is_navigable(next_cell):
+		return "lost"
+	if not grid.try_claim(next_cell, p["id"]):
+		return "blocked"
+
+	if move_toward_point(p, grid.cell_to_world(next_cell), speed, dt):
+		if p["cell"] != next_cell and p["cell"] != AirportGrid.NOWHERE:
+			grid.release(p["cell"], p["id"])
+		p["cell"] = next_cell
+		p["path_index"] += 1
+		if p["path_index"] >= p["path"].size():
+			return "arrived"
+	return "moving"
+
+
+func taxi_priority(p: Dictionary) -> int:
+	return 1 if p["state"] == "TAXI_TO_GATE" else 0
+
+
+func yields_to(p: Dictionary, other: Dictionary) -> bool:
+	var mine := taxi_priority(p)
+	var theirs := taxi_priority(other)
+	if mine != theirs:
+		return mine < theirs
+	return p["id"] > other["id"]
+
+
+# Escalating deadlock handling. Returns true when the plane has been stuck long
+# enough that the caller should give up on it.
+func handle_blocked(p: Dictionary, dt: float) -> bool:
+	p["blocked_timer"] += dt
+	p["repath_timer"] += dt
+
+	var next_cell: Vector2i = p["path"][p["path_index"]]
+	var blocker = find_plane(grid.claim_owner(next_cell))
+	var head_on := false
+	if blocker != null and blocker["path_index"] < blocker["path"].size():
+		head_on = blocker["path"][blocker["path_index"]] == p["cell"]
+
+	var must_yield: bool = head_on and blocker != null and yields_to(p, blocker)
+	if must_yield or p["repath_timer"] >= REPATH_INTERVAL:
+		p["repath_timer"] = 0.0
+		var dest := path_destination(p)
+		var alt := grid.find_path_avoiding_claims(p["cell"], dest, p["id"])
+		if alt.size() > 1:
+			set_path(p, alt)
+			return false
+
+	return p["blocked_timer"] >= MAX_BLOCK_TIME
+
+
+# --- teardown ---
+
+func release_plane(p: Dictionary) -> void:
+	grid.release_all(p["id"])
+	if p["gate_id"] != -1:
+		var g = grid.get_gate(p["gate_id"])
+		if g != null:
+			g["occupied"] = false
+		p["gate_id"] = -1
+	if p["runway_id"] != -1:
+		var r = grid.get_runway(p["runway_id"])
+		if r != null:
+			r["occupied"] = false
+		p["runway_id"] = -1
+	p["state"] = "REMOVE"
+	if selected_plane_id == p["id"]:
+		selected_plane_id = -1
+
+
+func divert(p: Dictionary, reason: String, rep_cost: int) -> void:
+	reputation = max(0, reputation - rep_cost)
+	add_log("%s DIVERTED — %s. Reputation -%d." % [p["callsign"], reason, rep_cost])
+	release_plane(p)
+
+
+# --- gate / runway acquisition ---
+
+func try_assign_gate(p: Dictionary) -> bool:
+	var best_path: Array = []
+	var best_gate = null
+	for g in grid.usable_free_gates():
+		var path := grid.find_path(p["cell"], g["cell"])
+		if path.is_empty():
+			continue
+		if best_path.is_empty() or path.size() < best_path.size():
+			best_path = path
+			best_gate = g
+	if best_gate == null:
+		return false
+
+	best_gate["occupied"] = true
+	p["gate_id"] = best_gate["id"]
+	set_path(p, best_path)
+	p["state"] = "TAXI_TO_GATE"
+	p["state_timer"] = 0.0
+	add_log("%s cleared to Gate %d." % [p["callsign"], best_gate["id"] + 1])
+	return true
+
+
+func assign_gate_manual(p: Dictionary, gate: Dictionary) -> void:
+	var path := grid.find_path(p["cell"], gate["cell"])
+	if path.is_empty():
+		add_log("No taxi route from %s to Gate %d." % [p["callsign"], gate["id"] + 1])
+		return
 	gate["occupied"] = true
-	plane["gate"] = gate
-	plane["state"] = "TAXI_TO_GATE"
-	plane["state_timer"] = 0.0
-	add_log("%s assigned to Gate %d." % [plane["airline"], gate["id"] + 1])
+	p["gate_id"] = gate["id"]
+	set_path(p, path)
+	p["state"] = "TAXI_TO_GATE"
+	p["state_timer"] = 0.0
+	add_log("%s assigned to Gate %d." % [p["callsign"], gate["id"] + 1])
 
 
-func find_free_runway_index() -> int:
-	for i in range(runways.size()):
-		if not runways[i]["occupied"]:
-			return i
-	return -1
+func runway_has_waiting_departure(runway_id: int) -> bool:
+	for p in planes:
+		if p["state"] == "HOLD_SHORT" and p["runway_id"] == runway_id:
+			return true
+	return false
 
 
-func find_free_gate_index() -> int:
-	for i in range(gates.size()):
-		if not gates[i]["occupied"]:
-			return i
-	return -1
+# Arrivals must not starve departures: a plane already holding short goes first,
+# otherwise a steady arrival stream traps outbound traffic until it gets towed.
+func find_arrival_runway() -> Variant:
+	for r in grid.runways:
+		if grid.runway_is_clear(r) and not runway_has_waiting_departure(r["id"]):
+			return r
+	return null
 
+
+func find_departure_runway(p: Dictionary) -> Dictionary:
+	for r in grid.runways:
+		if not grid.runway_is_usable(r):
+			continue
+		var target: Vector2i = grid.runway_hold_short_cell(r)
+		if target == AirportGrid.NOWHERE:
+			# Nothing beside the threshold to wait on, so the plane has to
+			# occupy the runway itself — only worth starting if it's clear.
+			if not grid.runway_is_clear(r):
+				continue
+			target = grid.runway_threshold(r)
+		var path := grid.find_path(p["cell"], target)
+		if not path.is_empty():
+			return {"runway": r, "path": path}
+	return {}
+
+
+func tow(p: Dictionary, reason: String) -> void:
+	money = max(0, money - TOW_FEE)
+	reputation = max(0, reputation - 5)
+	add_log("%s %s — towed off. -$%d, Reputation -5." % [p["callsign"], reason, TOW_FEE])
+	release_plane(p)
+
+
+# --- per-plane state machine ---
 
 func update_plane(p: Dictionary, dt: float) -> void:
 	p["state_timer"] += dt
@@ -135,213 +300,546 @@ func update_plane(p: Dictionary, dt: float) -> void:
 	match p["state"]:
 		"AIR_HOLD":
 			p["air_hold_timer"] += dt
-			p["x"] = 40.0 + sin(p["air_hold_timer"] * 1.5) * 20.0
-			p["y"] = 40.0 + cos(p["air_hold_timer"] * 1.5) * 15.0
-			var runway_idx = find_free_runway_index()
-			if runway_idx != -1:
-				var free_runway: Dictionary = runways[runway_idx]
-				free_runway["occupied"] = true
-				p["runway"] = free_runway
-				p["state"] = "INBOUND"
+			var t: float = p["air_hold_timer"] * 1.5
+			var orbit := AIR_ANCHOR + Vector2(sin(t) * 34.0, cos(t) * 22.0)
+			p["heading"] = (orbit - p["pos"]).angle()
+			p["pos"] = p["pos"].move_toward(orbit, FLY_SPEED * dt)
+
+			var runway = find_arrival_runway()
+			if runway != null:
+				runway["occupied"] = true
+				p["runway_id"] = runway["id"]
+				p["state"] = "APPROACH"
 				p["state_timer"] = 0.0
 			elif p["air_hold_timer"] >= p["max_air_hold"]:
-				reputation = max(0, reputation - 15)
-				add_log("%s DIVERTED — no runway available. Reputation -15." % p["airline"])
-				p["state"] = "REMOVE"
+				var reason := "no usable runway" if not grid.has_usable_runway() else "all runways busy"
+				divert(p, reason, 15)
+
+		"APPROACH":
+			var runway = grid.get_runway(p["runway_id"])
+			if runway == null:
+				divert(p, "runway removed on approach", 15)
+				return
+			# Line up behind the threshold so the plane arrives along the runway
+			# axis instead of turning 90 degrees on touchdown.
+			var lineup: Vector2 = grid.cell_to_world(grid.runway_threshold(runway)) \
+				- grid.runway_direction(runway) * 220.0
+			if move_toward_point(p, lineup, FLY_SPEED, dt):
+				p["state"] = "INBOUND"
+				p["state_timer"] = 0.0
 
 		"INBOUND":
-			var t = min(p["state_timer"] / 4.0, 1.0)
-			p["x"] = lerp(-40.0, RUNWAY_X1, t)
-			p["y"] = p["runway"]["y"]
-			if t >= 1.0:
+			var runway = grid.get_runway(p["runway_id"])
+			if runway == null:
+				divert(p, "runway removed on approach", 15)
+				return
+			var threshold: Vector2i = grid.runway_threshold(runway)
+			if move_toward_point(p, grid.cell_to_world(threshold), FLY_SPEED, dt):
+				grid.try_claim(threshold, p["id"])
+				p["cell"] = threshold
+				var exit_cell: Vector2i = grid.runway_exit_cell(runway)
+				var cells: Array = runway["cells"]
+				set_path(p, cells.slice(0, cells.find(exit_cell) + 1))
 				p["state"] = "LANDING"
 				p["state_timer"] = 0.0
-				add_log("%s touching down on Runway %d." % [p["airline"], p["runway"]["id"] + 1])
+				add_log("%s touching down on Runway %d." % [p["callsign"], runway["id"] + 1])
 
 		"LANDING":
-			var t = min(p["state_timer"] / 3.0, 1.0)
-			p["x"] = lerp(RUNWAY_X1, TAXI_X, t)
-			p["y"] = p["runway"]["y"]
-			if t >= 1.0:
-				p["runway"]["occupied"] = false
-				p["state"] = "SEEK_GATE"
-				p["state_timer"] = 0.0
+			match advance_along_path(p, ROLLOUT_SPEED, dt):
+				"arrived":
+					var runway = grid.get_runway(p["runway_id"])
+					if runway != null:
+						runway["occupied"] = false
+					p["runway_id"] = -1
+					p["state"] = "SEEK_GATE"
+					p["state_timer"] = 0.0
+				"blocked":
+					p["blocked_timer"] += dt
+					if p["blocked_timer"] >= MAX_BLOCK_TIME:
+						divert(p, "runway exit blocked", 15)
+				"lost":
+					divert(p, "runway removed while landing", 15)
 
 		"SEEK_GATE":
-			var gate_idx = find_free_gate_index()
-			if gate_idx != -1:
-				assign_gate(p, gates[gate_idx])
-			else:
+			if try_assign_gate(p):
+				return
+			if grid.usable_free_gates().is_empty():
 				p["state"] = "HOLDING"
 				p["hold_timer"] = 0.0
-				add_log("%s holding — no free gate." % p["airline"])
+				set_path(p, [])
+				add_log("%s holding — no free gate." % p["callsign"])
+			else:
+				divert(p, "no taxi route to any gate", 10)
 
 		"HOLDING":
 			p["hold_timer"] += dt
-			p["x"] = TAXI_X + sin(p["hold_timer"] * 2.0) * 6.0
-			p["y"] = p["runway"]["y"]
+			if try_assign_gate(p):
+				return
+			if p["path_index"] < p["path"].size():
+				advance_along_path(p, TAXI_SPEED, dt)
+			elif p["path"].is_empty():
+				var spot: Vector2i = grid.nearest_free_taxiway(p["cell"], p["id"])
+				if spot != AirportGrid.NOWHERE:
+					var path := grid.find_path(p["cell"], spot)
+					if path.size() > 1:
+						set_path(p, path)
 			if p["hold_timer"] >= p["max_hold"]:
-				reputation = max(0, reputation - 10)
-				add_log("%s DIVERTED — too long without a gate. Reputation -10." % p["airline"])
-				p["state"] = "REMOVE"
+				divert(p, "too long without a gate", 10)
 
 		"TAXI_TO_GATE":
-			var start_x = TAXI_X
-			var start_y = p["runway"]["y"]
-			var end_x = p["gate"]["x"] + p["gate"]["w"] / 2.0
-			var end_y = p["gate"]["y"] + p["gate"]["h"] + 10.0
-			var t = min(p["state_timer"] / 3.0, 1.0)
-			p["x"] = lerp(start_x, end_x, t)
-			p["y"] = lerp(start_y, end_y, t)
-			if t >= 1.0:
-				p["state"] = "AT_GATE"
-				p["state_timer"] = 0.0
-				add_log("%s at Gate %d, turning around." % [p["airline"], p["gate"]["id"] + 1])
+			match advance_along_path(p, TAXI_SPEED, dt):
+				"arrived":
+					p["state"] = "AT_GATE"
+					p["state_timer"] = 0.0
+					add_log("%s at Gate %d, turning around." % [p["callsign"], p["gate_id"] + 1])
+				"blocked":
+					if handle_blocked(p, dt):
+						divert(p, "gridlocked on the taxiway", 10)
+				"lost":
+					var gate = grid.get_gate(p["gate_id"])
+					if gate == null:
+						divert(p, "gate demolished en route", 10)
+					else:
+						var path := grid.find_path(p["cell"], gate["cell"])
+						if path.size() > 1:
+							set_path(p, path)
+						else:
+							divert(p, "taxi route destroyed", 10)
 
 		"AT_GATE":
 			if p["state_timer"] >= p["turnaround"]:
 				money += p["payout"]
-				add_log("%s turnaround complete. +$%d" % [p["airline"], p["payout"]])
-				p["state"] = "TAXI_OUT"
+				add_log("%s turnaround complete. +$%d" % [p["callsign"], p["payout"]])
+				p["state"] = "AWAIT_DEPART"
 				p["state_timer"] = 0.0
+
+		"AWAIT_DEPART":
+			var departure := find_departure_runway(p)
+			if departure.is_empty():
+				return
+			p["runway_id"] = departure["runway"]["id"]
+			set_path(p, departure["path"])
+			# Gate frees at pushback, not at the runway — keeps throughput sane.
+			var gate = grid.get_gate(p["gate_id"])
+			if gate != null:
+				gate["occupied"] = false
+			p["gate_id"] = -1
+			p["state"] = "TAXI_OUT"
+			p["state_timer"] = 0.0
 
 		"TAXI_OUT":
-			var start_x = p["gate"]["x"] + p["gate"]["w"] / 2.0
-			var start_y = p["gate"]["y"] + p["gate"]["h"] + 10.0
-			var end_x = TAXI_X
-			var end_y = p["runway"]["y"]
-			var t = min(p["state_timer"] / 3.0, 1.0)
-			p["x"] = lerp(start_x, end_x, t)
-			p["y"] = lerp(start_y, end_y, t)
-			if t >= 1.0:
-				p["gate"]["occupied"] = false
-				p["gate"] = null
+			match advance_along_path(p, TAXI_SPEED, dt):
+				"arrived":
+					p["state"] = "HOLD_SHORT"
+					p["state_timer"] = 0.0
+				"blocked":
+					if handle_blocked(p, dt):
+						tow(p, "gridlocked outbound")
+				"lost":
+					var runway = grid.get_runway(p["runway_id"])
+					if runway == null:
+						tow(p, "runway removed while taxiing")
+					else:
+						var path := grid.find_path(p["cell"], grid.runway_hold_short_cell(runway))
+						if path.size() > 1:
+							set_path(p, path)
+						else:
+							tow(p, "taxi route destroyed")
+
+		"HOLD_SHORT":
+			var runway = grid.get_runway(p["runway_id"])
+			if runway == null:
+				tow(p, "runway removed before takeoff")
+				return
+			# Claim the runway only now, so a long taxi-out doesn't block landings.
+			if grid.runway_is_clear(runway, p["id"]):
+				runway["occupied"] = true
+				set_path(p, runway["cells"])
 				p["state"] = "DEPARTING"
 				p["state_timer"] = 0.0
+			elif p["state_timer"] >= MAX_BLOCK_TIME:
+				tow(p, "never got a takeoff slot")
 
 		"DEPARTING":
-			var t = min(p["state_timer"] / 3.0, 1.0)
-			p["x"] = lerp(TAXI_X, 1000.0, t)
-			p["y"] = p["runway"]["y"]
-			if t >= 1.0:
-				add_log("%s departed." % p["airline"])
+			match advance_along_path(p, TAKEOFF_SPEED, dt):
+				"arrived":
+					grid.release_all(p["id"])
+					var runway = grid.get_runway(p["runway_id"])
+					if runway != null:
+						runway["occupied"] = false
+					p["runway_id"] = -1
+					p["cell"] = AirportGrid.NOWHERE
+					p["state"] = "CLIMB_OUT"
+					p["state_timer"] = 0.0
+				"blocked":
+					p["blocked_timer"] += dt
+					if p["blocked_timer"] >= MAX_BLOCK_TIME:
+						tow(p, "takeoff roll blocked")
+				"lost":
+					tow(p, "runway removed during takeoff")
+
+		"CLIMB_OUT":
+			var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
+			p["pos"] = p["pos"] + fwd * TAKEOFF_SPEED * dt
+			if not get_viewport_rect().grow(120.0).has_point(p["pos"]):
+				add_log("%s departed." % p["callsign"])
 				p["state"] = "REMOVE"
 
+
+# --- build actions ---
+
+func apply_tool_at(cell: Vector2i) -> void:
+	if not grid.in_bounds(cell):
+		return
+
+	match tool:
+		Tool.TAXIWAY:
+			if not grid.can_place_taxiway(cell):
+				return
+			if money < COST_TAXIWAY:
+				add_log("Not enough money for taxiway ($%d)." % COST_TAXIWAY)
+				return
+			money -= COST_TAXIWAY
+			grid.place_taxiway(cell)
+
+		Tool.GATE:
+			if not grid.can_place_gate(cell):
+				return
+			if money < COST_GATE:
+				add_log("Not enough money for a gate ($%d)." % COST_GATE)
+				return
+			money -= COST_GATE
+			var id := grid.place_gate(cell)
+			var gate = grid.get_gate(id)
+			if grid.gate_is_connected(gate):
+				add_log("Built Gate %d for $%d." % [id + 1, COST_GATE])
+			else:
+				add_log("Built Gate %d — NOT connected to a taxiway, no flights will use it." % (id + 1))
+
+		Tool.DEMOLISH:
+			var preview := grid.demolish_preview(cell)
+			if preview.is_empty():
+				add_log("Can't demolish that — it's in use or empty.")
+				return
+			var refund := int(round(tile_cost(preview["type"]) * preview["tiles"] * REFUND_RATE))
+			grid.demolish(cell)
+			money += refund
+			add_log("Demolished %d tile(s), refunded $%d." % [preview["tiles"], refund])
+
+
+func commit_runway(from: Vector2i, to: Vector2i) -> void:
+	var cells := grid.line_cells(from, to)
+	if not grid.can_place_runway(cells):
+		add_log("Runway must be placed on clear ground.")
+		return
+	var cost: int = COST_RUNWAY_TILE * cells.size()
+	if money < cost:
+		add_log("Not enough money — that runway costs $%d." % cost)
+		return
+	money -= cost
+	var id := grid.place_runway(cells)
+	var runway = grid.get_runway(id)
+	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
+		add_log("Built Runway %d for $%d — TOO SHORT (needs %d tiles)." % [id + 1, cost, AirportGrid.MIN_RUNWAY_LEN])
+	elif not grid.runway_is_usable(runway):
+		add_log("Built Runway %d for $%d — no taxiway connection yet." % [id + 1, cost])
+	else:
+		add_log("Built Runway %d for $%d." % [id + 1, cost])
+
+
+func tile_cost(type: int) -> int:
+	match type:
+		AirportGrid.TileType.TAXIWAY:
+			return COST_TAXIWAY
+		AirportGrid.TileType.RUNWAY:
+			return COST_RUNWAY_TILE
+		AirportGrid.TileType.GATE:
+			return COST_GATE
+	return 0
+
+
+# --- input ---
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion:
+		hover_cell = grid.world_to_cell(event.position)
+		if is_dragging and tool == Tool.TAXIWAY:
+			apply_tool_at(hover_cell)
+		return
+
+	if not (event is InputEventMouseButton) or event.button_index != MOUSE_BUTTON_LEFT:
+		return
+
+	var cell := grid.world_to_cell(event.position)
+
+	if event.pressed:
+		if tool == Tool.SELECT:
+			_handle_select_click(event.position, cell)
+			return
+		is_dragging = true
+		drag_start = cell
+		if tool == Tool.RUNWAY:
+			return
+		apply_tool_at(cell)
+	else:
+		if is_dragging and tool == Tool.RUNWAY and grid.in_bounds(drag_start) and grid.in_bounds(cell):
+			commit_runway(drag_start, cell)
+		is_dragging = false
+
+
+func _handle_select_click(pos: Vector2, cell: Vector2i) -> void:
+	for p in planes:
+		if p["pos"].distance_to(pos) < 18.0:
+			selected_plane_id = p["id"]
+			add_log("Selected %s (%s)." % [p["callsign"], p["state"]])
+			return
+
+	var gate = grid.gate_at(cell)
+	if gate != null:
+		if gate["occupied"]:
+			add_log("Gate %d is occupied." % (gate["id"] + 1))
+			return
+		if not grid.gate_is_connected(gate):
+			add_log("Gate %d has no taxiway connection." % (gate["id"] + 1))
+			return
+		var p = find_plane(selected_plane_id)
+		if p == null:
+			add_log("Select a holding plane first.")
+		elif p["state"] != "HOLDING":
+			add_log("%s is not holding for a gate." % p["callsign"])
+		else:
+			assign_gate_manual(p, gate)
+			selected_plane_id = -1
+		return
+
+	selected_plane_id = -1
+
+
+# --- frame ---
 
 func _process(delta: float) -> void:
 	time_elapsed += delta
 
 	if time_elapsed >= next_spawn_at:
 		spawn_plane()
-		var tightness = max(0.0, 1.0 - time_elapsed / 180.0)
-		var min_gap = 3.0 + 3.0 * tightness
-		var max_gap = 6.0 + 4.0 * tightness
+		var tightness: float = max(0.0, 1.0 - time_elapsed / 180.0)
+		var min_gap := 3.0 + 3.0 * tightness
+		var max_gap := 6.0 + 4.0 * tightness
 		next_spawn_at = time_elapsed + min_gap + randf() * (max_gap - min_gap)
 
 	for p in planes:
-		update_plane(p, delta)
+		if p["state"] != "REMOVE":
+			update_plane(p, delta)
+	for p in planes:
+		if p["state"] == "REMOVE":
+			grid.release_all(p["id"])
 	planes = planes.filter(func(p): return p["state"] != "REMOVE")
 
+	_update_hud()
+	queue_redraw()
+
+
+func _update_hud() -> void:
 	money_label.text = "Money: $%d" % money
 	rep_label.text = "Reputation: %d" % reputation
 	next_in_label.text = "Next contract in: %.1fs" % max(0.0, next_spawn_at - time_elapsed)
 
-	if gates.size() >= MAX_GATES:
-		build_gate_btn.text = "Build Gate (MAX)"
-	else:
-		build_gate_btn.text = "Build Gate ($%d)" % gate_cost()
-	build_gate_btn.disabled = gates.size() >= MAX_GATES or money < gate_cost()
+	var usable_runways := 0
+	for r in grid.runways:
+		if grid.runway_is_usable(r):
+			usable_runways += 1
+	var connected_gates := 0
+	for g in grid.gates:
+		if grid.gate_is_connected(g):
+			connected_gates += 1
+	stats_label.text = "Runways: %d (%d usable)\nGates: %d (%d connected)\nAircraft: %d" % [
+		grid.runways.size(), usable_runways, grid.gates.size(), connected_gates, planes.size(),
+	]
 
-	if runways.size() >= MAX_RUNWAYS:
-		build_runway_btn.text = "Build Runway (MAX)"
-	else:
-		build_runway_btn.text = "Build Runway ($%d)" % runway_cost()
-	build_runway_btn.disabled = runways.size() >= MAX_RUNWAYS or money < runway_cost()
+	match tool:
+		Tool.SELECT:
+			hint_label.text = "SELECT — click a plane to see its route,\nthen click a free gate to assign it."
+			tool_info_label.text = "Build tools cost money; demolish refunds %d%%." % int(REFUND_RATE * 100)
+		Tool.TAXIWAY:
+			hint_label.text = "TAXIWAY — click or drag to paint.\nGates and runways need a taxiway connection."
+			tool_info_label.text = "$%d per tile" % COST_TAXIWAY
+		Tool.RUNWAY:
+			hint_label.text = "RUNWAY — drag a straight line.\nMinimum %d tiles to be usable." % AirportGrid.MIN_RUNWAY_LEN
+			tool_info_label.text = "$%d per tile" % COST_RUNWAY_TILE
+		Tool.GATE:
+			hint_label.text = "GATE — click a tile next to a taxiway."
+			tool_info_label.text = "$%d each" % COST_GATE
+		Tool.DEMOLISH:
+			hint_label.text = "DEMOLISH — click to remove.\nOccupied gates and runways can't be removed."
+			tool_info_label.text = "Refunds %d%% of build cost" % int(REFUND_RATE * 100)
 
-	queue_redraw()
 
+# --- rendering ---
 
 func _draw() -> void:
-	draw_rect(Rect2(0, 0, 960, 600), Color(0.227, 0.361, 0.227), true)
+	var view := get_viewport_rect()
+	draw_rect(view, Color(0.227, 0.361, 0.227), true)
 
-	for r in runways:
-		draw_rect(Rect2(RUNWAY_X1 - 10, r["y"] - 18, (RUNWAY_X2 - RUNWAY_X1) + 20, 36), Color(0.33, 0.33, 0.33), true)
-		draw_dashed_line(Vector2(RUNWAY_X1, r["y"]), Vector2(RUNWAY_X2, r["y"]), Color(0.87, 0.87, 0.87), 2.0, 14.0)
-		var col = Color(0.95, 0.55, 0.42) if r["occupied"] else Color(0.81, 0.91, 0.81)
-		draw_string(ThemeDB.fallback_font, Vector2(RUNWAY_X1 - 5, r["y"] - 22), "RWY %d" % (r["id"] + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, col)
+	var field := grid.grid_rect()
+	draw_rect(field, Color(0.19, 0.31, 0.19), true)
+	_draw_grid_lines(field)
 
-	var lowest_runway_y = runways[runways.size() - 1]["y"]
-	draw_rect(Rect2(TAXI_X - 10, 130, 20, lowest_runway_y - 130), Color(0.4, 0.4, 0.4), true)
+	for cell in grid.tiles:
+		if grid.tile_type(cell) == AirportGrid.TileType.TAXIWAY:
+			_draw_tile(cell, Color(0.40, 0.40, 0.43))
 
-	draw_rect(TERMINAL, Color(0.49, 0.49, 0.54), true)
-	draw_string(ThemeDB.fallback_font, Vector2(TERMINAL.position.x + TERMINAL.size.x / 2.0 - 28, TERMINAL.position.y + 14), "TERMINAL", HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.87, 0.87, 0.87))
+	for r in grid.runways:
+		_draw_runway(r)
+	for g in grid.gates:
+		_draw_gate(g)
 
-	for g in gates:
-		var fill = Color(0.75, 0.32, 0.25) if g["occupied"] else Color(0.18, 0.42, 0.18)
-		var outline = Color(1.0, 0.7, 0.63) if g["occupied"] else Color(0.61, 0.91, 0.61)
-		draw_rect(Rect2(g["x"], g["y"], g["w"], g["h"]), fill, true)
-		draw_rect(Rect2(g["x"], g["y"], g["w"], g["h"]), outline, false, 2.0)
-		draw_string(ThemeDB.fallback_font, Vector2(g["x"] + g["w"] / 2.0 - 10, g["y"] + g["h"] / 2.0 + 4), "G%d" % (g["id"] + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.07, 0.07, 0.07))
+	_draw_selected_route()
 
 	for p in planes:
-		var color = Color(0.91, 0.91, 0.91)
-		if p["state"] == "AIR_HOLD":
+		_draw_plane(p)
+
+	_draw_ghost()
+
+
+func _draw_grid_lines(field: Rect2) -> void:
+	var line_color := Color(1, 1, 1, 0.045)
+	for x in range(AirportGrid.COLS + 1):
+		var px: float = field.position.x + x * AirportGrid.TILE
+		draw_line(Vector2(px, field.position.y), Vector2(px, field.end.y), line_color, 1.0)
+	for y in range(AirportGrid.ROWS + 1):
+		var py: float = field.position.y + y * AirportGrid.TILE
+		draw_line(Vector2(field.position.x, py), Vector2(field.end.x, py), line_color, 1.0)
+
+
+func _cell_rect(cell: Vector2i) -> Rect2:
+	return Rect2(AirportGrid.ORIGIN + Vector2(cell) * AirportGrid.TILE, Vector2(AirportGrid.TILE, AirportGrid.TILE))
+
+
+func _draw_tile(cell: Vector2i, color: Color) -> void:
+	draw_rect(_cell_rect(cell), color, true)
+
+
+func _draw_runway(r: Dictionary) -> void:
+	var cells: Array = r["cells"]
+	for c in cells:
+		_draw_tile(c, Color(0.28, 0.28, 0.30))
+
+	var first: Vector2 = grid.cell_to_world(cells[0])
+	var last: Vector2 = grid.cell_to_world(cells[cells.size() - 1])
+	draw_dashed_line(first, last, Color(0.87, 0.87, 0.87, 0.8), 2.0, 12.0)
+
+	var usable := grid.runway_is_usable(r)
+	var label_color := Color(0.95, 0.55, 0.42) if r["occupied"] else Color(0.81, 0.91, 0.81)
+	if not usable:
+		label_color = Color(1.0, 0.45, 0.45)
+		for c in cells:
+			draw_rect(_cell_rect(c), Color(1.0, 0.35, 0.35, 0.9), false, 1.0)
+
+	var label := "RWY %d" % (r["id"] + 1)
+	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
+		label += " (TOO SHORT)"
+	elif not usable:
+		label += " (NO TAXIWAY)"
+	draw_string(ThemeDB.fallback_font, first + Vector2(-14, -18), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_color)
+
+
+func _draw_gate(g: Dictionary) -> void:
+	var rect := _cell_rect(g["cell"])
+	var connected := grid.gate_is_connected(g)
+	var fill := Color(0.75, 0.32, 0.25) if g["occupied"] else Color(0.18, 0.42, 0.18)
+	var outline := Color(1.0, 0.7, 0.63) if g["occupied"] else Color(0.61, 0.91, 0.61)
+	if not connected:
+		fill = Color(0.45, 0.35, 0.15)
+		outline = Color(1.0, 0.45, 0.45)
+
+	draw_rect(rect, fill, true)
+	draw_rect(rect, outline, false, 2.0)
+	draw_string(ThemeDB.fallback_font, rect.position + Vector2(8, 21), "G%d" % (g["id"] + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.95, 0.95, 0.95))
+	if not connected:
+		draw_string(ThemeDB.fallback_font, rect.position + Vector2(-6, -6), "unconnected", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1.0, 0.55, 0.55))
+
+
+func _draw_selected_route() -> void:
+	var p = find_plane(selected_plane_id)
+	if p == null or p["path"].is_empty():
+		return
+	var points := PackedVector2Array([p["pos"]])
+	for i in range(p["path_index"], p["path"].size()):
+		points.append(grid.cell_to_world(p["path"][i]))
+	if points.size() > 1:
+		draw_polyline(points, Color(1.0, 0.37, 0.82, 0.65), 3.0)
+
+
+func _draw_plane(p: Dictionary) -> void:
+	var color := Color(0.91, 0.91, 0.91)
+	match p["state"]:
+		"AIR_HOLD":
 			color = Color(0.96, 0.65, 0.26)
-		if p["state"] == "HOLDING":
+		"HOLDING":
 			color = Color(0.96, 0.83, 0.26)
-		if p["state"] == "AT_GATE":
+		"AT_GATE", "AWAIT_DEPART":
 			color = Color(0.26, 0.77, 0.96)
-		if selected_plane_id == p["id"]:
-			color = Color(1.0, 0.37, 0.82)
+	if p["blocked_timer"] > 1.0:
+		color = Color(0.95, 0.35, 0.35)
+	if selected_plane_id == p["id"]:
+		color = Color(1.0, 0.37, 0.82)
 
-		var px = p["x"]
-		var py = p["y"]
-		var points = PackedVector2Array([
-			Vector2(px + 14, py),
-			Vector2(px - 10, py - 8),
-			Vector2(px - 10, py + 8),
-		])
-		draw_colored_polygon(points, color)
+	var pos: Vector2 = p["pos"]
+	var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
+	var side := Vector2(-fwd.y, fwd.x)
 
-		var label = p["airline"]
-		if p["state"] == "HOLDING":
-			label += " (HOLDING)"
-		if p["state"] == "AIR_HOLD":
+	draw_line(pos + side * 9.0, pos - side * 9.0, color.darkened(0.25), 3.0)
+	draw_colored_polygon(PackedVector2Array([
+		pos + fwd * 13.0,
+		pos - fwd * 8.0 + side * 6.0,
+		pos - fwd * 8.0 - side * 6.0,
+	]), color)
+
+	var label: String = p["callsign"]
+	match p["state"]:
+		"AIR_HOLD":
 			label += " (circling)"
-		draw_string(ThemeDB.fallback_font, Vector2(px - 20, py - 14), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 1))
+		"HOLDING":
+			label += " (holding)"
+		"AWAIT_DEPART":
+			label += " (waiting for runway)"
+		"HOLD_SHORT":
+			label += " (holding short)"
+	if p["blocked_timer"] > 1.0:
+		label += " !"
+	draw_string(ThemeDB.fallback_font, pos + Vector2(-22, -16), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 1))
 
 
-func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		var mx = event.position.x
-		var my = event.position.y
+func _draw_ghost() -> void:
+	if tool == Tool.SELECT or not grid.in_bounds(hover_cell):
+		return
 
-		for p in planes:
-			if p["state"] == "HOLDING":
-				var dx = mx - p["x"]
-				var dy = my - p["y"]
-				if dx * dx + dy * dy < 20.0 * 20.0:
-					selected_plane_id = p["id"]
-					add_log("Selected %s (holding)." % p["airline"])
-					return
+	var cells: Array = [hover_cell]
+	var ok := true
 
-		for g in gates:
-			if mx >= g["x"] and mx <= g["x"] + g["w"] and my >= g["y"] and my <= g["y"] + g["h"]:
-				if g["occupied"]:
-					add_log("Gate %d is occupied." % (g["id"] + 1))
-					return
-				if selected_plane_id == null:
-					add_log("Select a holding plane first.")
-					return
-				var found = null
-				for p in planes:
-					if p["id"] == selected_plane_id and p["state"] == "HOLDING":
-						found = p
-						break
-				if found != null:
-					assign_gate(found, g)
-					selected_plane_id = null
-				else:
-					add_log("Selected plane is no longer holding.")
-					selected_plane_id = null
-				return
+	match tool:
+		Tool.TAXIWAY:
+			ok = grid.can_place_taxiway(hover_cell) and money >= COST_TAXIWAY
+		Tool.GATE:
+			ok = grid.can_place_gate(hover_cell) and money >= COST_GATE
+		Tool.RUNWAY:
+			if is_dragging and grid.in_bounds(drag_start):
+				cells = grid.line_cells(drag_start, hover_cell)
+			ok = grid.can_place_runway(cells) and money >= COST_RUNWAY_TILE * cells.size()
+		Tool.DEMOLISH:
+			var preview := grid.demolish_preview(hover_cell)
+			ok = not preview.is_empty()
+			if ok:
+				cells = preview["cells"]
+
+	var fill := Color(0.4, 1.0, 0.5, 0.3) if ok else Color(1.0, 0.3, 0.3, 0.3)
+	if tool == Tool.DEMOLISH and ok:
+		fill = Color(1.0, 0.65, 0.2, 0.35)
+	for c in cells:
+		if grid.in_bounds(c):
+			draw_rect(_cell_rect(c), fill, true)
+
+	if tool == Tool.RUNWAY and cells.size() > 1:
+		var cost := COST_RUNWAY_TILE * cells.size()
+		var anchor := grid.cell_to_world(cells[0]) + Vector2(-10, -16)
+		draw_string(ThemeDB.fallback_font, anchor, "%d tiles — $%d" % [cells.size(), cost], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1))
