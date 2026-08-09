@@ -117,10 +117,20 @@ const REP_MAX := 100
 const SAVE_PATH := "user://airport_save.dat"
 const SAVE_VERSION := 2
 
-const MAX_CONTRACTS := 2
-# Signed contracts generate their own traffic, so taking one you can't handle
-# actively floods the airport instead of just sitting in a list.
-const CONTRACT_TRAFFIC_SHARE := 0.6
+const AIRPORT_CODE := "HOME"
+const MAX_ROUTES := 8
+# Commitment buys volume at a worse unit price: a charter pays over list, a
+# recurring route takes a cut, and a hub carrier takes the deepest cut of all
+# while supplying far more flights than either.
+const CHARTER_RATE := 1.30
+const ROUTE_RATE := 0.85
+const HUB_RATE := 0.70
+const HUB_ROUTE_REQ := 3
+const HUB_BREAK_REP := 20
+# A scheduled flight you cannot fit is turned away, which is what
+# over-committing on routes actually costs.
+const ARRIVAL_GRACE := 40.0
+const REP_TURNED_AWAY := 7
 
 const SPAWN_POS := Vector2(-60.0, 150.0)
 const AIR_ANCHOR := Vector2(110.0, 160.0)
@@ -152,7 +162,9 @@ var _echo_log := false
 var _auto_sign := false
 
 var offer = null
-var contracts: Array = []
+var routes: Array = []
+var arrival_queue: Array = []
+var hub_airline := ""
 var next_offer_at := 25.0
 
 # Setup runs before the simulation: 0 picks a continent, 1 picks a region, 2 plays.
@@ -516,91 +528,187 @@ func end_of_day() -> void:
 		add_log("OVERDRAWN — couldn't cover upkeep. Reputation -12.")
 
 
-# --- contracts ---
+# --- airline relationships ---
+# Three tiers, escalating in volume and falling in unit price:
+#   charter - one-off flight, premium rate, no commitment
+#   route   - recurring daily arrivals from one origin at a discount
+#   hub     - one airline only, heavy daily volume at the deepest discount
+# Earning a hub offer means already running several routes for that airline from
+# different origins, so the ladder is the progression.
 
 func can_handle_class(size: int) -> bool:
 	var need: Dictionary = CLASSES[size]
 	var runway_ok := false
 	for r in grid.runways:
-		if grid.runway_is_usable(r) and r["cells"].size() >= need["min_runway"]:
+		if grid.runway_is_usable(r) and r["cells"].size() >= int(need["min_runway"]):
 			runway_ok = true
 			break
 	if not runway_ok:
 		return false
 	for g in grid.gates:
-		if grid.gate_is_connected(g) and g["size"] >= need["gate_size"]:
+		if grid.gate_is_connected(g) and g["size"] >= int(need["gate_size"]):
 			return true
 	return false
 
 
+func random_origin() -> Array:
+	var list: Array = region["origins"]
+	return list[randi() % list.size()]
+
+
+# Offer an airline somewhere it does not already fly from, otherwise it keeps
+# proposing the same city and can never build up to a hub.
+func fresh_origin_for(airline: String) -> Array:
+	var taken := {}
+	for r in routes_for(airline):
+		taken[r["origin"][0]] = true
+	var options := []
+	for o in region["origins"]:
+		if not taken.has(o[0]):
+			options.append(o)
+	if options.is_empty():
+		return random_origin()
+	return options[randi() % options.size()]
+
+
+func routes_for(airline: String) -> Array:
+	var out := []
+	for r in routes:
+		if r["airline"] == airline:
+			out.append(r)
+	return out
+
+
+func distinct_origins(airline: String) -> int:
+	var seen := {}
+	for r in routes_for(airline):
+		seen[r["origin"][0]] = true
+	return seen.size()
+
+
+# An airline will talk hub once it already flies enough distinct routes here.
+func hub_candidate() -> String:
+	for a in AIRLINES:
+		if a != hub_airline and distinct_origins(a) >= HUB_ROUTE_REQ:
+			return a
+	return ""
+
+
+func daily_route_flights() -> int:
+	var n := 0
+	for r in routes:
+		n += int(r["per_day"])
+	return n
+
+
 func make_offer() -> Dictionary:
-	var size := pick_size()
-	var count := 3 + randi() % 4
-	var cls: Dictionary = CLASSES[size]
-	var per: int = (cls["fee_min"] + cls["fee_max"]) / 2 * REVENUE_SCALE
+	var cand := hub_candidate()
+	if cand != "" and randf() < 0.6:
+		var origins := []
+		for r in routes_for(cand):
+			if not origins.has(r["origin"]):
+				origins.append(r["origin"])
+		return {
+			"kind": "hub", "airline": cand, "origins": origins,
+			"per_day": 8 + randi() % 5, "rate": HUB_RATE,
+			"size": 1 + randi() % 2,
+		}
+
+	if randf() < 0.4:
+		return {
+			"kind": "charter", "airline": AIRLINES[randi() % AIRLINES.size()],
+			"origin": random_origin(), "size": pick_size(),
+			"rate": CHARTER_RATE, "per_day": 1,
+		}
+
+	var carrier: String = AIRLINES[randi() % AIRLINES.size()]
 	return {
-		"airline": AIRLINES[randi() % AIRLINES.size()],
-		"size": size, "count": count, "progress": 0,
-		"reward": int(per * count * 0.6),
-		"penalty": 8 + count * 2,
-		"duration": 70.0 + count * 28.0,
-		"deadline": 0.0,
+		"kind": "route", "airline": carrier,
+		"origin": fresh_origin_for(carrier), "size": pick_size(),
+		"per_day": 2 + randi() % 3, "rate": ROUTE_RATE,
 	}
 
 
+func offer_daily_value(o: Dictionary) -> int:
+	var cls: Dictionary = CLASSES[o["size"]]
+	var per: int = (int(cls["fee_min"]) + int(cls["fee_max"])) / 2
+	return int(per * REVENUE_SCALE * float(o["rate"]) * int(o["per_day"]))
+
+
 func accept_offer() -> void:
-	if offer == null or contracts.size() >= MAX_CONTRACTS:
+	if offer == null:
 		return
-	offer["deadline"] = time_elapsed + offer["duration"]
-	contracts.append(offer)
-	add_log("Signed %s: %d %s flights in %ds for %s." % [
-		offer["airline"], offer["count"], CLASSES[offer["size"]]["name"],
-		int(offer["duration"]), money_str(offer["reward"]),
-	])
+	match offer["kind"]:
+		"charter":
+			# A one-off turns up shortly; nothing recurring is committed.
+			arrival_queue.append({
+				"at": time_elapsed + 8.0 + randf() * 20.0,
+				"airline": offer["airline"], "origin": offer["origin"],
+				"size": offer["size"], "rate": offer["rate"], "kind": "charter",
+			})
+			add_log("Took a %s charter from %s (%s)." % [
+				CLASSES[offer["size"]]["name"], offer["origin"][1], offer["origin"][0],
+			])
+		"route":
+			if routes.size() >= MAX_ROUTES:
+				add_log("Too many routes already — turn one down first.")
+				return
+			routes.append({
+				"airline": offer["airline"], "origin": offer["origin"],
+				"size": offer["size"], "per_day": offer["per_day"], "rate": offer["rate"],
+			})
+			add_log("Opened route %s-%s for %s: %d %s daily at %d%% of list." % [
+				offer["origin"][0], AIRPORT_CODE, offer["airline"], offer["per_day"],
+				CLASSES[offer["size"]]["name"], int(offer["rate"] * 100.0),
+			])
+			schedule_day_arrivals()
+		"hub":
+			if hub_airline != "":
+				# Only one hub carrier at a time, and walking away from one is costly.
+				reputation = max(0, reputation - HUB_BREAK_REP)
+				add_log("Broke the %s hub agreement. Reputation -%d." % [hub_airline, HUB_BREAK_REP])
+				routes = routes.filter(func(r): return not r.get("hub", false))
+			hub_airline = offer["airline"]
+			for o in offer["origins"]:
+				routes.append({
+					"airline": hub_airline, "origin": o, "size": offer["size"],
+					"per_day": maxi(2, int(offer["per_day"]) / max(1, offer["origins"].size())),
+					"rate": offer["rate"], "hub": true,
+				})
+			add_log("%s HUB AGREEMENT signed — %d daily flights at %d%% of list." % [
+				hub_airline, offer["per_day"], int(offer["rate"] * 100.0),
+			])
+			schedule_day_arrivals()
 	offer = null
-	next_offer_at = time_elapsed + 45.0 + randf() * 30.0
+	next_offer_at = time_elapsed + 45.0 + randf() * 35.0
 
 
 func decline_offer() -> void:
 	if offer == null:
 		return
-	add_log("Passed on the %s contract." % offer["airline"])
+	add_log("Passed on the %s %s." % [offer["airline"], offer["kind"]])
 	offer = null
 	next_offer_at = time_elapsed + 25.0 + randf() * 20.0
 
 
-func contract_needing_traffic() -> Variant:
-	for c in contracts:
-		if c["progress"] < c["count"]:
-			return c
-	return null
+# Route flights are spread across the day so volume arrives as a stream rather
+# than a single burst at the day boundary.
+func schedule_day_arrivals() -> void:
+	arrival_queue = arrival_queue.filter(func(a): return a["kind"] == "charter")
+	for r in routes:
+		for i in int(r["per_day"]):
+			var frac := (float(i) + 0.5 + randf() * 0.4) / float(r["per_day"])
+			arrival_queue.append({
+				"at": (day - 1) * DAY_LENGTH + frac * DAY_LENGTH,
+				"airline": r["airline"], "origin": r["origin"],
+				"size": r["size"], "rate": r["rate"], "kind": "route",
+			})
 
 
-func credit_contracts(p: Dictionary) -> void:
-	for c in contracts:
-		if c["airline"] == p["airline"] and c["size"] == p["size"] and c["progress"] < c["count"]:
-			c["progress"] += 1
-			if c["progress"] >= c["count"]:
-				money += c["reward"]
-				earned += c["reward"]
-				reputation = min(REP_MAX, reputation + 5)
-				add_log("CONTRACT COMPLETE — %s. +%s, Reputation +5." % [c["airline"], money_str(c["reward"])])
-			return
-
-
-func update_contracts() -> void:
-	for c in contracts:
-		if c["progress"] < c["count"] and time_elapsed >= c["deadline"]:
-			reputation = max(0, reputation - c["penalty"])
-			add_log("CONTRACT FAILED — %s, %d of %d flights. Reputation -%d." % [
-				c["airline"], c["progress"], c["count"], c["penalty"],
-			])
-			c["progress"] = -1
-	contracts = contracts.filter(func(c): return c["progress"] >= 0 and c["progress"] < c["count"])
-
-	if offer == null and contracts.size() < MAX_CONTRACTS and time_elapsed >= next_offer_at:
+func update_offers() -> void:
+	if offer == null and time_elapsed >= next_offer_at:
 		offer = make_offer()
-		add_log("%s is offering a contract." % offer["airline"])
+		add_log("%s is offering a %s." % [offer["airline"], offer["kind"]])
 		if _auto_sign:
 			if can_handle_class(offer["size"]):
 				accept_offer()
@@ -608,20 +716,38 @@ func update_contracts() -> void:
 				decline_offer()
 
 
-func spawn_plane() -> void:
-	var airline: String = AIRLINES[randi() % AIRLINES.size()]
-	var size := pick_size()
-	var contract = contract_needing_traffic()
-	if contract != null and randf() < CONTRACT_TRAFFIC_SHARE:
-		airline = contract["airline"]
-		size = contract["size"]
+# A scheduled flight the airport cannot take within the grace period is turned
+# away. This is what over-committing on routes actually costs.
+func process_scheduled_arrivals() -> void:
+	var expired := []
+	for a in arrival_queue:
+		if time_elapsed < a["at"]:
+			continue
+		if time_elapsed > a["at"] + ARRIVAL_GRACE:
+			expired.append(a)
+			continue
+		if wx_closed() or airborne_count() >= effective_air_capacity():
+			continue
+		spawn_flight(a["airline"], a["size"], a["origin"], a["rate"], a["kind"])
+		expired.append(a)
+	for a in expired:
+		arrival_queue.erase(a)
+		if time_elapsed > a["at"] + ARRIVAL_GRACE:
+			reputation = max(0, reputation - REP_TURNED_AWAY)
+			diverted += 1
+			add_log("%s %s from %s TURNED AWAY — no capacity. Reputation -%d." % [
+				a["airline"], CLASSES[a["size"]]["name"], a["origin"][0], REP_TURNED_AWAY,
+			])
+
+
+func spawn_flight(airline: String, size: int, origin: Array, rate: float, kind: String) -> void:
 	var cls: Dictionary = CLASSES[size]
-	var fee: int = cls["fee_min"] + randi() % (cls["fee_max"] - cls["fee_min"] + 1)
-	var payout: int = fee * REVENUE_SCALE
+	var fee: int = int(cls["fee_min"]) + randi() % (int(cls["fee_max"]) - int(cls["fee_min"]) + 1)
+	var payout := int(fee * REVENUE_SCALE * rate)
 	var callsign := "%s %d" % [airline, plane_id_seq]
 	planes.append({
 		"id": plane_id_seq, "airline": airline, "payout": payout,
-		"size": size, "callsign": callsign,
+		"size": size, "callsign": callsign, "origin": origin, "kind": kind,
 		"state": "AIR_HOLD",
 		"pos": SPAWN_POS, "heading": 0.0,
 		"cell": AirportGrid.NOWHERE,
@@ -637,8 +763,16 @@ func spawn_plane() -> void:
 		"service_wait": 0.0, "delay_logged": false, "holds": {},
 		"wants_check": randf() < MAINT_CHANCE,
 	})
-	add_log("%s inbound — %s, fee %s." % [callsign, cls["name"], money_str(payout)])
+	add_log("%s inbound from %s — %s, fee %s." % [
+		callsign, origin[0], cls["name"], money_str(payout),
+	])
 	plane_id_seq += 1
+
+
+# Unscheduled walk-in traffic, so an airport with no routes still has something
+# to do. It thins out as contracted volume grows.
+func spawn_plane() -> void:
+	spawn_flight(AIRLINES[randi() % AIRLINES.size()], pick_size(), random_origin(), 1.0, "walk-in")
 
 
 # --- movement primitives ---
@@ -1029,7 +1163,6 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				served += 1
 				reputation = min(REP_MAX, reputation + REP_PER_TURNAROUND)
 				add_log("%s turnaround complete. +%s" % [p["callsign"], money_str(take)])
-				credit_contracts(p)
 				release_service(p)
 				p["state"] = "AWAIT_DEPART"
 				p["state_timer"] = 0.0
@@ -1295,7 +1428,7 @@ func _process(delta: float) -> void:
 			_end_run()
 	_update_hud()
 	_update_ops_ui()
-	_update_contract_ui()
+	_update_route_ui()
 	queue_redraw()
 
 
@@ -1342,7 +1475,8 @@ func _simulate(dt: float) -> void:
 		day_time -= DAY_LENGTH
 		end_of_day()
 	update_weather()
-	update_contracts()
+	update_offers()
+	process_scheduled_arrivals()
 
 	if time_elapsed >= next_spawn_at:
 		_try_spawn()
@@ -1376,7 +1510,11 @@ func save_game() -> void:
 		"day": day, "day_time": day_time, "day_revenue": day_revenue,
 		"last_day_revenue": last_day_revenue, "last_upkeep": last_upkeep,
 		"facilities": facilities.duplicate(),
-		"contracts": contracts.duplicate(true),
+		"routes": routes.duplicate(true),
+		"arrival_queue": arrival_queue.duplicate(true),
+		"hub_airline": hub_airline,
+		"continent_idx": continent_idx,
+		"region_name": region.get("name", ""),
 		"offer": null if offer == null else offer.duplicate(true),
 		"next_offer_at": next_offer_at,
 		"grid": grid.to_dict(),
@@ -1421,7 +1559,18 @@ func load_game() -> void:
 	# No aircraft are restored, so nothing is holding ground support.
 	for k in used:
 		used[k] = 0
-	contracts = d["contracts"]
+	routes = d["routes"]
+	arrival_queue = d["arrival_queue"]
+	hub_airline = d["hub_airline"]
+	# Location has to come back too, or weather and origins would be wrong.
+	continent_idx = d["continent_idx"]
+	if continent_idx >= 0:
+		continent_name = Regions.CONTINENTS[continent_idx]["name"]
+		for r in Regions.CONTINENTS[continent_idx]["regions"]:
+			if r["name"] == d["region_name"]:
+				region = r
+		setup_stage = 2
+		_show_setup()
 	offer = d["offer"]
 	next_offer_at = d["next_offer_at"]
 
@@ -1503,43 +1652,64 @@ func _update_ops_ui() -> void:
 		$UI/FacilityPanel.get_node("Row%dSell" % i).disabled = n <= 0
 
 
-func _update_contract_ui() -> void:
+func _update_route_ui() -> void:
 	var offer_label: Label = $UI/RoutePanel/OfferLabel
 	var active_label: Label = $UI/RoutePanel/ActiveLabel
-	var full := contracts.size() >= MAX_CONTRACTS
 
 	if offer == null:
 		offer_label.text = "No offers right now.\n\nNext approach in %ds." % int(max(0.0, next_offer_at - time_elapsed))
 	else:
 		var cls: Dictionary = CLASSES[offer["size"]]
-		# Kept to five lines: the label has to clear the Sign/Pass buttons below it.
-		var lines := [
-			"%s wants a deal:" % offer["airline"],
-			"%d x %s within %ds" % [offer["count"], cls["name"], int(offer["duration"])],
-			"Pays %s bonus · fail -%d rep" % [money_str(offer["reward"]), offer["penalty"]],
-			"Needs %s + %s stand" % [length_str(cls["min_runway"]), "widebody" if cls["gate_size"] >= 2 else "small"],
-		]
+		var lines := []
+		match offer["kind"]:
+			"charter":
+				lines = [
+					"%s one-off charter" % offer["airline"],
+					"%s from %s (%s)" % [cls["name"], offer["origin"][1], offer["origin"][0]],
+					"Pays %d%% of list, no commitment" % int(offer["rate"] * 100.0),
+					"About %s for the single flight" % money_str(offer_daily_value(offer)),
+				]
+			"route":
+				lines = [
+					"%s wants a daily route" % offer["airline"],
+					"%s x %s from %s (%s)" % [offer["per_day"], cls["name"], offer["origin"][1], offer["origin"][0]],
+					"Rate %d%% of list, ongoing" % int(offer["rate"] * 100.0),
+					"About %s per day" % money_str(offer_daily_value(offer)),
+				]
+			"hub":
+				lines = [
+					"%s HUB AGREEMENT" % offer["airline"],
+					"%d daily flights across %d origins" % [offer["per_day"], offer["origins"].size()],
+					"Rate %d%% of list — deepest discount" % int(offer["rate"] * 100.0),
+					"About %s per day" % money_str(offer_daily_value(offer)),
+				]
+				if hub_airline != "":
+					lines.append("!! Drops the %s hub, -%d rep" % [hub_airline, HUB_BREAK_REP])
 		if not can_handle_class(offer["size"]):
 			lines.append("!! Airport can't handle this yet")
-		elif full:
-			lines.append("!! Contract slots full")
 		offer_label.text = "\n".join(lines)
 
 	$UI/RoutePanel/AcceptBtn.visible = offer != null
 	$UI/RoutePanel/DeclineBtn.visible = offer != null
-	$UI/RoutePanel/AcceptBtn.disabled = full
 
-	if contracts.is_empty():
-		active_label.text = "Signed: none."
+	var parts := []
+	if hub_airline != "":
+		parts.append("HUB: %s" % hub_airline)
+	if routes.is_empty():
+		parts.append("No routes yet — walk-in traffic only.")
 	else:
-		var parts := ["Signed:"]
-		for c in contracts:
-			parts.append("")
-			parts.append("%s — %d/%d %s" % [
-				c["airline"], c["progress"], c["count"], CLASSES[c["size"]]["code"],
+		parts.append("%d routes · %d flights/day" % [routes.size(), daily_route_flights()])
+		for r in routes:
+			parts.append("  %s %s %dx %s %d%%" % [
+				r["airline"], r["origin"][0], r["per_day"],
+				CLASSES[r["size"]]["code"], int(r["rate"] * 100.0),
 			])
-			parts.append("  %ds left · %s" % [int(max(0.0, c["deadline"] - time_elapsed)), money_str(c["reward"])])
-		active_label.text = "\n".join(parts)
+	# Show the ladder toward a hub so the progression is visible.
+	for a in AIRLINES:
+		var n := distinct_origins(a)
+		if a != hub_airline and n > 0 and n < HUB_ROUTE_REQ:
+			parts.append("%s: %d/%d origins to hub" % [a, n, HUB_ROUTE_REQ])
+	active_label.text = "\n".join(parts)
 
 
 func _update_hud() -> void:
