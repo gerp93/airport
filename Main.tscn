@@ -19,8 +19,9 @@ corner_radius_bottom_right = 6
 corner_radius_bottom_left = 6
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_sidebar"]
-bg_color = Color(0.07, 0.09, 0.11, 0.9)
+bg_color = Color(0.07, 0.09, 0.11, 0.92)
 border_width_left = 1
+border_width_top = 1
 border_color = Color(0.35, 0.45, 0.4, 1)
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_restart"]
@@ -42,46 +43,62 @@ script = ExtResource("1_main")
 
 [node name="MoneyLabel" type="Label" parent="UI"]
 offset_left = 10.0
-offset_top = 8.0
-offset_right = 260.0
+offset_top = 6.0
+offset_right = 336.0
 offset_bottom = 28.0
-text = "Money: $0"
+text = "Cash: $0"
 
 [node name="RepLabel" type="Label" parent="UI"]
 offset_left = 10.0
-offset_top = 30.0
-offset_right = 260.0
+offset_top = 28.0
+offset_right = 336.0
 offset_bottom = 50.0
 text = "Reputation: 100"
 
+[node name="DayLabel" type="Label" parent="UI"]
+offset_left = 10.0
+offset_top = 50.0
+offset_right = 336.0
+offset_bottom = 72.0
+text = "Day 1"
+
 [node name="NextInLabel" type="Label" parent="UI"]
 offset_left = 10.0
-offset_top = 52.0
-offset_right = 320.0
-offset_bottom = 72.0
-text = "Next contract in: -"
+offset_top = 72.0
+offset_right = 336.0
+offset_bottom = 94.0
+text = "Next flight in: -"
 
 [node name="StatsLabel" type="Label" parent="UI"]
-offset_left = 330.0
-offset_top = 8.0
+offset_left = 344.0
+offset_top = 6.0
 offset_right = 700.0
-offset_bottom = 72.0
-text = "Runways: 0
-Gates: 0"
+offset_bottom = 94.0
+theme_override_font_sizes/font_size = 13
+text = "Runways: 0"
+
+[node name="CapacityLabel" type="Label" parent="UI"]
+offset_left = 712.0
+offset_top = 6.0
+offset_right = 1016.0
+offset_bottom = 94.0
+theme_override_font_sizes/font_size = 13
+text = ""
 
 [node name="HintLabel" type="Label" parent="UI"]
-offset_left = 720.0
-offset_top = 8.0
-offset_right = 1270.0
-offset_bottom = 72.0
+offset_left = 1024.0
+offset_top = 6.0
+offset_right = 1432.0
+offset_bottom = 94.0
+theme_override_font_sizes/font_size = 13
 horizontal_alignment = 2
-text = "Select a holding plane, then a free gate."
+text = "Select a holding plane, then a free stand."
 
 [node name="SelectBtn" type="Button" parent="UI"]
 offset_left = 10.0
-offset_top = 606.0
+offset_top = 680.0
 offset_right = 120.0
-offset_bottom = 636.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_pressed = true
@@ -90,9 +107,9 @@ text = "Select"
 
 [node name="TaxiwayBtn" type="Button" parent="UI"]
 offset_left = 126.0
-offset_top = 606.0
+offset_top = 680.0
 offset_right = 236.0
-offset_bottom = 636.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
@@ -100,9 +117,9 @@ text = "Taxiway"
 
 [node name="RunwayBtn" type="Button" parent="UI"]
 offset_left = 242.0
-offset_top = 606.0
+offset_top = 680.0
 offset_right = 352.0
-offset_bottom = 636.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
@@ -110,9 +127,9 @@ text = "Runway"
 
 [node name="GateSmallBtn" type="Button" parent="UI"]
 offset_left = 358.0
-offset_top = 606.0
+offset_top = 680.0
 offset_right = 468.0
-offset_bottom = 636.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
@@ -120,9 +137,9 @@ text = "Stand S"
 
 [node name="GateLargeBtn" type="Button" parent="UI"]
 offset_left = 474.0
-offset_top = 606.0
+offset_top = 680.0
 offset_right = 584.0
-offset_bottom = 636.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
@@ -130,28 +147,37 @@ text = "Stand W"
 
 [node name="DemolishBtn" type="Button" parent="UI"]
 offset_left = 590.0
-offset_top = 606.0
+offset_top = 680.0
 offset_right = 700.0
-offset_bottom = 636.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
 text = "Demolish"
 
+[node name="ToolInfoLabel" type="Label" parent="UI"]
+offset_left = 710.0
+offset_top = 684.0
+offset_right = 1090.0
+offset_bottom = 706.0
+horizontal_alignment = 2
+clip_text = true
+text = ""
+
 [node name="PauseBtn" type="Button" parent="UI"]
-offset_left = 1004.0
-offset_top = 606.0
-offset_right = 1074.0
-offset_bottom = 636.0
+offset_left = 1100.0
+offset_top = 680.0
+offset_right = 1180.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 text = "Pause"
 
 [node name="Speed1Btn" type="Button" parent="UI"]
-offset_left = 1080.0
-offset_top = 606.0
-offset_right = 1140.0
-offset_bottom = 636.0
+offset_left = 1186.0
+offset_top = 680.0
+offset_right = 1246.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_pressed = true
@@ -159,109 +185,240 @@ button_group = SubResource("ButtonGroup_speed")
 text = "1x"
 
 [node name="Speed2Btn" type="Button" parent="UI"]
-offset_left = 1146.0
-offset_top = 606.0
-offset_right = 1206.0
-offset_bottom = 636.0
+offset_left = 1252.0
+offset_top = 680.0
+offset_right = 1312.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_speed")
 text = "2x"
 
 [node name="Speed3Btn" type="Button" parent="UI"]
-offset_left = 1212.0
-offset_top = 606.0
-offset_right = 1270.0
-offset_bottom = 636.0
+offset_left = 1318.0
+offset_top = 680.0
+offset_right = 1378.0
+offset_bottom = 712.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_speed")
 text = "4x"
 
-[node name="ToolInfoLabel" type="Label" parent="UI"]
-offset_left = 700.0
-offset_top = 610.0
-offset_right = 995.0
-offset_bottom = 632.0
-horizontal_alignment = 2
-clip_text = true
-text = "Click a plane to inspect its route."
-
-[node name="ContractPanel" type="Panel" parent="UI"]
+[node name="FacilityPanel" type="Panel" parent="UI"]
 offset_left = 1024.0
-offset_top = 88.0
-offset_right = 1280.0
-offset_bottom = 600.0
+offset_top = 96.0
+offset_right = 1440.0
+offset_bottom = 392.0
 theme_override_styles/panel = SubResource("StyleBoxFlat_sidebar")
 
-[node name="Title" type="Label" parent="UI/ContractPanel"]
+[node name="Title" type="Label" parent="UI/FacilityPanel"]
 offset_left = 12.0
-offset_top = 8.0
-offset_right = 244.0
-offset_bottom = 30.0
+offset_top = 6.0
+offset_right = 404.0
+offset_bottom = 28.0
 theme_override_font_sizes/font_size = 15
-text = "CONTRACTS"
+text = "GROUND OPERATIONS"
 
-[node name="OfferLabel" type="Label" parent="UI/ContractPanel"]
+[node name="Row0Label" type="Label" parent="UI/FacilityPanel"]
 offset_left = 12.0
-offset_top = 36.0
-offset_right = 244.0
-offset_bottom = 200.0
-theme_override_font_sizes/font_size = 13
+offset_top = 34.0
+offset_right = 300.0
+offset_bottom = 78.0
+theme_override_font_sizes/font_size = 12
+vertical_alignment = 1
+text = ""
+
+[node name="Row0Buy" type="Button" parent="UI/FacilityPanel"]
+offset_left = 306.0
+offset_top = 42.0
+offset_right = 352.0
+offset_bottom = 70.0
+focus_mode = 0
+text = "+"
+
+[node name="Row0Sell" type="Button" parent="UI/FacilityPanel"]
+offset_left = 358.0
+offset_top = 42.0
+offset_right = 404.0
+offset_bottom = 70.0
+focus_mode = 0
+text = "-"
+
+[node name="Row1Label" type="Label" parent="UI/FacilityPanel"]
+offset_left = 12.0
+offset_top = 84.0
+offset_right = 300.0
+offset_bottom = 128.0
+theme_override_font_sizes/font_size = 12
+vertical_alignment = 1
+text = ""
+
+[node name="Row1Buy" type="Button" parent="UI/FacilityPanel"]
+offset_left = 306.0
+offset_top = 92.0
+offset_right = 352.0
+offset_bottom = 120.0
+focus_mode = 0
+text = "+"
+
+[node name="Row1Sell" type="Button" parent="UI/FacilityPanel"]
+offset_left = 358.0
+offset_top = 92.0
+offset_right = 404.0
+offset_bottom = 120.0
+focus_mode = 0
+text = "-"
+
+[node name="Row2Label" type="Label" parent="UI/FacilityPanel"]
+offset_left = 12.0
+offset_top = 134.0
+offset_right = 300.0
+offset_bottom = 178.0
+theme_override_font_sizes/font_size = 12
+vertical_alignment = 1
+text = ""
+
+[node name="Row2Buy" type="Button" parent="UI/FacilityPanel"]
+offset_left = 306.0
+offset_top = 142.0
+offset_right = 352.0
+offset_bottom = 170.0
+focus_mode = 0
+text = "+"
+
+[node name="Row2Sell" type="Button" parent="UI/FacilityPanel"]
+offset_left = 358.0
+offset_top = 142.0
+offset_right = 404.0
+offset_bottom = 170.0
+focus_mode = 0
+text = "-"
+
+[node name="Row3Label" type="Label" parent="UI/FacilityPanel"]
+offset_left = 12.0
+offset_top = 184.0
+offset_right = 300.0
+offset_bottom = 228.0
+theme_override_font_sizes/font_size = 12
+vertical_alignment = 1
+text = ""
+
+[node name="Row3Buy" type="Button" parent="UI/FacilityPanel"]
+offset_left = 306.0
+offset_top = 192.0
+offset_right = 352.0
+offset_bottom = 220.0
+focus_mode = 0
+text = "+"
+
+[node name="Row3Sell" type="Button" parent="UI/FacilityPanel"]
+offset_left = 358.0
+offset_top = 192.0
+offset_right = 404.0
+offset_bottom = 220.0
+focus_mode = 0
+text = "-"
+
+[node name="Row4Label" type="Label" parent="UI/FacilityPanel"]
+offset_left = 12.0
+offset_top = 234.0
+offset_right = 300.0
+offset_bottom = 278.0
+theme_override_font_sizes/font_size = 12
+vertical_alignment = 1
+text = ""
+
+[node name="Row4Buy" type="Button" parent="UI/FacilityPanel"]
+offset_left = 306.0
+offset_top = 242.0
+offset_right = 352.0
+offset_bottom = 270.0
+focus_mode = 0
+text = "+"
+
+[node name="Row4Sell" type="Button" parent="UI/FacilityPanel"]
+offset_left = 358.0
+offset_top = 242.0
+offset_right = 404.0
+offset_bottom = 270.0
+focus_mode = 0
+text = "-"
+
+[node name="RoutePanel" type="Panel" parent="UI"]
+offset_left = 1024.0
+offset_top = 396.0
+offset_right = 1440.0
+offset_bottom = 672.0
+theme_override_styles/panel = SubResource("StyleBoxFlat_sidebar")
+
+[node name="Title" type="Label" parent="UI/RoutePanel"]
+offset_left = 12.0
+offset_top = 6.0
+offset_right = 404.0
+offset_bottom = 28.0
+theme_override_font_sizes/font_size = 15
+text = "ROUTES & CHARTERS"
+
+[node name="OfferLabel" type="Label" parent="UI/RoutePanel"]
+offset_left = 12.0
+offset_top = 32.0
+offset_right = 404.0
+offset_bottom = 140.0
+theme_override_font_sizes/font_size = 12
 autowrap_mode = 2
 vertical_alignment = 0
 text = ""
 
-[node name="AcceptBtn" type="Button" parent="UI/ContractPanel"]
+[node name="AcceptBtn" type="Button" parent="UI/RoutePanel"]
 visible = false
 offset_left = 12.0
-offset_top = 204.0
-offset_right = 124.0
-offset_bottom = 234.0
+offset_top = 146.0
+offset_right = 200.0
+offset_bottom = 176.0
 focus_mode = 0
 text = "Sign (A)"
 
-[node name="DeclineBtn" type="Button" parent="UI/ContractPanel"]
+[node name="DeclineBtn" type="Button" parent="UI/RoutePanel"]
 visible = false
-offset_left = 132.0
-offset_top = 204.0
-offset_right = 244.0
-offset_bottom = 234.0
+offset_left = 208.0
+offset_top = 146.0
+offset_right = 404.0
+offset_bottom = 176.0
 focus_mode = 0
 text = "Pass (D)"
 
-[node name="ActiveLabel" type="Label" parent="UI/ContractPanel"]
+[node name="ActiveLabel" type="Label" parent="UI/RoutePanel"]
 offset_left = 12.0
-offset_top = 246.0
-offset_right = 244.0
-offset_bottom = 452.0
-theme_override_font_sizes/font_size = 13
+offset_top = 182.0
+offset_right = 404.0
+offset_bottom = 234.0
+theme_override_font_sizes/font_size = 12
 autowrap_mode = 2
 vertical_alignment = 0
 text = ""
 
-[node name="SaveBtn" type="Button" parent="UI/ContractPanel"]
+[node name="SaveBtn" type="Button" parent="UI/RoutePanel"]
 offset_left = 12.0
-offset_top = 466.0
-offset_right = 124.0
-offset_bottom = 498.0
+offset_top = 240.0
+offset_right = 200.0
+offset_bottom = 270.0
 focus_mode = 0
 text = "Save (F5)"
 
-[node name="LoadBtn" type="Button" parent="UI/ContractPanel"]
-offset_left = 132.0
-offset_top = 466.0
-offset_right = 244.0
-offset_bottom = 498.0
+[node name="LoadBtn" type="Button" parent="UI/RoutePanel"]
+offset_left = 208.0
+offset_top = 240.0
+offset_right = 404.0
+offset_bottom = 270.0
 focus_mode = 0
 text = "Load (F9)"
 
 [node name="GameOverPanel" type="Panel" parent="UI"]
 visible = false
-offset_left = 390.0
-offset_top = 195.0
-offset_right = 890.0
-offset_bottom = 525.0
+offset_left = 470.0
+offset_top = 250.0
+offset_right = 970.0
+offset_bottom = 580.0
 theme_override_styles/panel = SubResource("StyleBoxFlat_gameover")
 
 [node name="GameOverLabel" type="Label" parent="UI/GameOverPanel"]
@@ -285,9 +442,9 @@ text = "New airport"
 
 [node name="LogLabel" type="RichTextLabel" parent="UI"]
 offset_left = 10.0
-offset_top = 642.0
-offset_right = 1270.0
-offset_bottom = 714.0
+offset_top = 718.0
+offset_right = 1430.0
+offset_bottom = 892.0
 bbcode_enabled = false
 scroll_active = true
 scroll_following = true

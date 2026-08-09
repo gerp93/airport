@@ -18,18 +18,24 @@ const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
 
 # Bigger aircraft pay much better but demand a longer runway and a wider stand,
 # so the fleet mix is what pushes the player to keep investing in the layout.
+# "Regional" rather than light GA: real general aviation pays almost nothing in
+# landing fees, which would make the opening minutes income-free. A 50-80 seat
+# regional jet is both realistic and worth serving.
 const CLASSES := [
 	{
-		"name": "Light", "code": "L", "min_runway": 6, "gate_size": 1,
-		"pay_min": 55, "pay_max": 95, "turnaround": 4.0, "scale": 0.7,
+		"name": "Regional", "code": "R", "min_runway": 6, "gate_size": 1,
+		"fee_min": 700, "fee_max": 1_100, "turnaround": 4.0, "scale": 0.7,
+		"term_units": 1,
 	},
 	{
 		"name": "Narrowbody", "code": "N", "min_runway": 12, "gate_size": 1,
-		"pay_min": 150, "pay_max": 240, "turnaround": 8.0, "scale": 1.0,
+		"fee_min": 1_900, "fee_max": 2_900, "turnaround": 8.0, "scale": 1.0,
+		"term_units": 2,
 	},
 	{
 		"name": "Widebody", "code": "W", "min_runway": 18, "gate_size": 2,
-		"pay_min": 330, "pay_max": 480, "turnaround": 13.0, "scale": 1.35,
+		"fee_min": 6_500, "fee_max": 9_500, "turnaround": 13.0, "scale": 1.35,
+		"term_units": 3,
 	},
 ]
 
@@ -40,11 +46,61 @@ const CLASSES := [
 const FEET_PER_TILE := 600
 const LENGTH_UNIT := "ft"
 
-const COST_TAXIWAY := 15
-const COST_RUNWAY_TILE := 40
-const COST_GATE_TILE := 250
+# --- economy scale ---
+# Capital costs and upkeep are real 2020s figures: runway pavement runs about
+# $2,500 per linear foot, a stand with a jet bridge ~$4.5M, a modern ATC tower
+# ~$35M, a terminal wing ~$55M. The per-flight fees in CLASSES are likewise
+# realistic aeronautical revenue (landing fee + parking + passenger charges).
+#
+# REVENUE_SCALE then multiplies that revenue, and it is the one deliberate lie
+# in the model. Real airports amortise a runway over decades and fund it with
+# grants, not landing fees, so at 1.0 the economics are true to life and the
+# game is unplayable. At 40 a runway pays back in roughly 15 game-days. The
+# fudge lives here alone so it can be dialled without touching anything else.
+const REVENUE_SCALE := 40
+
+const COST_TAXIWAY := 500_000
+const COST_RUNWAY_TILE := 1_500_000
+const COST_GATE_TILE := 4_500_000
 const REFUND_RATE := 0.5
-const TOW_FEE := 60
+const TOW_FEE := 25_000
+
+const UPKEEP_RUNWAY := 2_000
+const UPKEEP_STAND := 600
+const DAY_LENGTH := 90.0
+
+# Facilities are bought in units; each unit adds concurrency and daily upkeep,
+# so scaling up traffic means scaling up overhead.
+const FACILITIES := [
+	{
+		"key": "tower", "name": "Control Tower", "cost": 35_000_000,
+		"upkeep": 9_000, "per_unit": 3, "unit": "airborne",
+	},
+	{
+		"key": "crew", "name": "Ground Crew Team", "cost": 1_500_000,
+		"upkeep": 3_200, "per_unit": 2, "unit": "turnarounds",
+	},
+	{
+		"key": "fuel", "name": "Fuel Truck", "cost": 600_000,
+		"upkeep": 900, "per_unit": 2, "unit": "refuels",
+	},
+	{
+		"key": "term", "name": "Terminal Wing", "cost": 55_000_000,
+		"upkeep": 18_000, "per_unit": 6, "unit": "pax units",
+	},
+	{
+		"key": "mech", "name": "Maintenance Hangar", "cost": 22_000_000,
+		"upkeep": 7_500, "per_unit": 1, "unit": "checks",
+	},
+]
+const START_FACILITIES := {"tower": 1, "crew": 1, "fuel": 1, "term": 1, "mech": 0}
+
+# A line check is worth servicing if you have the hangar for it, so maintenance
+# is an extra revenue stream rather than another way to be punished.
+const MAINT_FEE := 2_500
+const MAINT_CHANCE := 0.12
+const MAINT_TIME_FACTOR := 1.5
+const SERVICE_PATIENCE := 18.0
 
 const TAXI_SPEED := 60.0
 const ROLLOUT_SPEED := 170.0
@@ -58,7 +114,7 @@ const REP_PER_TURNAROUND := 1
 const REP_MAX := 100
 
 const SAVE_PATH := "user://airport_save.dat"
-const SAVE_VERSION := 1
+const SAVE_VERSION := 2
 
 const MAX_CONTRACTS := 2
 # Signed contracts generate their own traffic, so taking one you can't handle
@@ -69,7 +125,14 @@ const SPAWN_POS := Vector2(-60.0, 150.0)
 const AIR_ANCHOR := Vector2(110.0, 160.0)
 
 var grid: AirportGrid
-var money := 300
+var money := 15_000_000
+var day := 1
+var day_time := 0.0
+var day_revenue := 0
+var last_day_revenue := 0
+var last_upkeep := 0
+var facilities := {}
+var used := {"crew": 0, "fuel": 0, "term": 0, "mech": 0}
 var reputation := 100
 var game_over := false
 var served := 0
@@ -100,6 +163,8 @@ var is_dragging := false
 @onready var money_label: Label = $UI/MoneyLabel
 @onready var rep_label: Label = $UI/RepLabel
 @onready var next_in_label: Label = $UI/NextInLabel
+@onready var day_label: Label = $UI/DayLabel
+@onready var capacity_label: Label = $UI/CapacityLabel
 @onready var stats_label: Label = $UI/StatsLabel
 @onready var hint_label: Label = $UI/HintLabel
 @onready var tool_info_label: Label = $UI/ToolInfoLabel
@@ -126,13 +191,45 @@ func _ready() -> void:
 	$UI/Speed2Btn.pressed.connect(_set_speed.bind(2.0))
 	$UI/Speed3Btn.pressed.connect(_set_speed.bind(4.0))
 	$UI/GameOverPanel/RestartBtn.pressed.connect(func(): get_tree().reload_current_scene())
-	$UI/ContractPanel/AcceptBtn.pressed.connect(accept_offer)
-	$UI/ContractPanel/DeclineBtn.pressed.connect(decline_offer)
-	$UI/ContractPanel/SaveBtn.pressed.connect(save_game)
-	$UI/ContractPanel/LoadBtn.pressed.connect(load_game)
+	$UI/RoutePanel/AcceptBtn.pressed.connect(accept_offer)
+	$UI/RoutePanel/DeclineBtn.pressed.connect(decline_offer)
+	$UI/RoutePanel/SaveBtn.pressed.connect(save_game)
+	$UI/RoutePanel/LoadBtn.pressed.connect(load_game)
 	_refresh_save_buttons()
 
+	# Godot's default Button style nearly vanishes on a dark panel, so the sidebar
+	# controls get an explicit one.
+	for b in [$UI/RoutePanel/AcceptBtn, $UI/RoutePanel/DeclineBtn,
+			$UI/RoutePanel/SaveBtn, $UI/RoutePanel/LoadBtn]:
+		_style_button(b)
+
+	facilities = START_FACILITIES.duplicate()
+	for i in FACILITIES.size():
+		var fkey: String = FACILITIES[i]["key"]
+		$UI/FacilityPanel.get_node("Row%dBuy" % i).pressed.connect(buy_facility.bind(fkey))
+		$UI/FacilityPanel.get_node("Row%dSell" % i).pressed.connect(sell_facility.bind(fkey))
+		_style_button($UI/FacilityPanel.get_node("Row%dBuy" % i))
+		_style_button($UI/FacilityPanel.get_node("Row%dSell" % i))
+
 	add_log("Airport open. Build taxiways to connect runways and gates.")
+
+
+func _style_button(b: Button) -> void:
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.17, 0.23, 0.27)
+	normal.border_color = Color(0.48, 0.60, 0.56)
+	normal.set_border_width_all(1)
+	normal.set_corner_radius_all(3)
+	b.add_theme_stylebox_override("normal", normal)
+
+	var hover := normal.duplicate()
+	hover.bg_color = Color(0.25, 0.33, 0.37)
+	b.add_theme_stylebox_override("hover", hover)
+
+	var disabled := normal.duplicate()
+	disabled.bg_color = Color(0.12, 0.14, 0.15)
+	disabled.border_color = Color(0.28, 0.32, 0.31)
+	b.add_theme_stylebox_override("disabled", disabled)
 
 
 func _on_pause_toggled(on: bool) -> void:
@@ -206,6 +303,102 @@ func pick_size() -> int:
 	return 0
 
 
+# --- facilities and capacity ---
+
+func fac_def(key: String) -> Dictionary:
+	for f in FACILITIES:
+		if f["key"] == key:
+			return f
+	return {}
+
+
+func capacity(key: String) -> int:
+	return facilities.get(key, 0) * int(fac_def(key)["per_unit"])
+
+
+func free_capacity(key: String) -> int:
+	return capacity(key) - int(used.get(key, 0))
+
+
+func total_upkeep() -> int:
+	var total := 0
+	for f in FACILITIES:
+		total += int(facilities.get(f["key"], 0)) * int(f["upkeep"])
+	total += grid.runways.size() * UPKEEP_RUNWAY
+	total += grid.gates.size() * UPKEEP_STAND
+	return total
+
+
+func buy_facility(key: String) -> void:
+	var d := fac_def(key)
+	if money < int(d["cost"]):
+		add_log("Not enough cash for a %s (%s)." % [d["name"].to_lower(), money_str(d["cost"])])
+		return
+	money -= int(d["cost"])
+	facilities[key] = int(facilities.get(key, 0)) + 1
+	add_log("Commissioned %s. Upkeep now %s/day." % [d["name"], money_str(total_upkeep())])
+
+
+func sell_facility(key: String) -> void:
+	var d := fac_def(key)
+	if int(facilities.get(key, 0)) <= 0:
+		return
+	# Never sell capacity that aircraft are currently occupying.
+	if capacity(key) - int(d["per_unit"]) < int(used.get(key, 0)):
+		add_log("That %s is in use right now." % d["name"].to_lower())
+		return
+	facilities[key] -= 1
+	var refund := int(int(d["cost"]) * REFUND_RATE)
+	money += refund
+	add_log("Decommissioned %s, recovered %s." % [d["name"], money_str(refund)])
+
+
+# Turnarounds need a crew, a fuel truck, and terminal capacity scaled by how many
+# passengers the aircraft carries. Maintenance is optional upside.
+func try_start_service(p: Dictionary) -> bool:
+	var need_term: int = class_of(p)["term_units"]
+	if free_capacity("crew") < 1 or free_capacity("fuel") < 1 or free_capacity("term") < need_term:
+		return false
+	var holds := {"crew": 1, "fuel": 1, "term": need_term}
+	if p["wants_check"] and free_capacity("mech") >= 1:
+		holds["mech"] = 1
+		p["turnaround"] *= MAINT_TIME_FACTOR
+	for k in holds:
+		used[k] = int(used[k]) + int(holds[k])
+	p["holds"] = holds
+	return true
+
+
+func release_service(p: Dictionary) -> void:
+	var holds: Dictionary = p.get("holds", {})
+	for k in holds:
+		used[k] = int(used[k]) - int(holds[k])
+	p["holds"] = {}
+
+
+func airborne_count() -> int:
+	var n := 0
+	for p in planes:
+		if p["state"] in ["AIR_HOLD", "APPROACH", "INBOUND", "LANDING"]:
+			n += 1
+	return n
+
+
+# --- day cycle ---
+
+func end_of_day() -> void:
+	var bill := total_upkeep()
+	money -= bill
+	last_upkeep = bill
+	last_day_revenue = day_revenue
+	day_revenue = 0
+	add_log("Day %d closed — took %s, upkeep %s." % [day, money_str(last_day_revenue), money_str(bill)])
+	day += 1
+	if money < 0:
+		reputation = max(0, reputation - 12)
+		add_log("OVERDRAWN — couldn't cover upkeep. Reputation -12.")
+
+
 # --- contracts ---
 
 func can_handle_class(size: int) -> bool:
@@ -227,7 +420,7 @@ func make_offer() -> Dictionary:
 	var size := pick_size()
 	var count := 3 + randi() % 4
 	var cls: Dictionary = CLASSES[size]
-	var per: int = (cls["pay_min"] + cls["pay_max"]) / 2
+	var per: int = (cls["fee_min"] + cls["fee_max"]) / 2 * REVENUE_SCALE
 	return {
 		"airline": AIRLINES[randi() % AIRLINES.size()],
 		"size": size, "count": count, "progress": 0,
@@ -243,9 +436,9 @@ func accept_offer() -> void:
 		return
 	offer["deadline"] = time_elapsed + offer["duration"]
 	contracts.append(offer)
-	add_log("Signed %s: %d %s flights in %ds for $%d." % [
+	add_log("Signed %s: %d %s flights in %ds for %s." % [
 		offer["airline"], offer["count"], CLASSES[offer["size"]]["name"],
-		int(offer["duration"]), offer["reward"],
+		int(offer["duration"]), money_str(offer["reward"]),
 	])
 	offer = null
 	next_offer_at = time_elapsed + 45.0 + randf() * 30.0
@@ -274,7 +467,7 @@ func credit_contracts(p: Dictionary) -> void:
 				money += c["reward"]
 				earned += c["reward"]
 				reputation = min(REP_MAX, reputation + 5)
-				add_log("CONTRACT COMPLETE — %s. +$%d, Reputation +5." % [c["airline"], c["reward"]])
+				add_log("CONTRACT COMPLETE — %s. +%s, Reputation +5." % [c["airline"], money_str(c["reward"])])
 			return
 
 
@@ -306,7 +499,8 @@ func spawn_plane() -> void:
 		airline = contract["airline"]
 		size = contract["size"]
 	var cls: Dictionary = CLASSES[size]
-	var payout: int = cls["pay_min"] + randi() % (cls["pay_max"] - cls["pay_min"] + 1)
+	var fee: int = cls["fee_min"] + randi() % (cls["fee_max"] - cls["fee_min"] + 1)
+	var payout: int = fee * REVENUE_SCALE
 	var callsign := "%s %d" % [airline, plane_id_seq]
 	planes.append({
 		"id": plane_id_seq, "airline": airline, "payout": payout,
@@ -323,8 +517,10 @@ func spawn_plane() -> void:
 		# Each aircraft gets its own hold pattern so a stack of waiting traffic
 		# doesn't collapse into one unreadable blob.
 		"orbit_phase": randf() * TAU, "orbit_radius": 26.0 + randf() * 26.0,
+		"service_wait": 0.0, "delay_logged": false, "holds": {},
+		"wants_check": randf() < MAINT_CHANCE,
 	})
-	add_log("%s inbound — %s, contract $%d." % [callsign, cls["name"], payout])
+	add_log("%s inbound — %s, fee %s." % [callsign, cls["name"], money_str(payout)])
 	plane_id_seq += 1
 
 
@@ -552,7 +748,7 @@ func find_departure_runway(p: Dictionary) -> Dictionary:
 func tow(p: Dictionary, reason: String) -> void:
 	money = max(0, money - TOW_FEE)
 	reputation = max(0, reputation - 5)
-	add_log("%s %s — towed off. -$%d, Reputation -5." % [p["callsign"], reason, TOW_FEE])
+	add_log("%s %s — towed off. -%s, Reputation -5." % [p["callsign"], reason, money_str(TOW_FEE)])
 	release_plane(p)
 
 
@@ -668,9 +864,9 @@ func update_plane(p: Dictionary, dt: float) -> void:
 		"TAXI_TO_GATE":
 			match advance_along_path(p, TAXI_SPEED, dt):
 				"arrived":
-					p["state"] = "AT_GATE"
+					p["state"] = "AWAIT_SERVICE"
 					p["state_timer"] = 0.0
-					add_log("%s at Gate %d, turning around." % [p["callsign"], p["gate_id"] + 1])
+					p["service_wait"] = 0.0
 				"blocked":
 					if handle_blocked(p, dt):
 						divert(p, "gridlocked on the taxiway", 10)
@@ -679,20 +875,38 @@ func update_plane(p: Dictionary, dt: float) -> void:
 					if gate == null:
 						divert(p, "gate demolished en route", 10)
 					else:
-						var path := grid.find_path(p["cell"], gate["cell"])
+						var path := grid.find_path(p["cell"], grid.gate_park_cell(gate))
 						if path.size() > 1:
 							set_path(p, path)
 						else:
 							divert(p, "taxi route destroyed", 10)
 
+		# Parked, but the turnaround cannot begin until ground support frees up.
+		"AWAIT_SERVICE":
+			p["service_wait"] += dt
+			if try_start_service(p):
+				p["state"] = "AT_GATE"
+				p["state_timer"] = 0.0
+				var extra := " (line check)" if p["holds"].has("mech") else ""
+				add_log("%s at Gate %d, turning around%s." % [p["callsign"], p["gate_id"] + 1, extra])
+			elif p["service_wait"] >= SERVICE_PATIENCE and not p["delay_logged"]:
+				p["delay_logged"] = true
+				reputation = max(0, reputation - 4)
+				add_log("%s stuck at the stand — no ground support free. Reputation -4." % p["callsign"])
+
 		"AT_GATE":
 			if p["state_timer"] >= p["turnaround"]:
-				money += p["payout"]
-				earned += p["payout"]
+				var take: int = p["payout"]
+				if p["holds"].has("mech"):
+					take += MAINT_FEE * REVENUE_SCALE
+				money += take
+				earned += take
+				day_revenue += take
 				served += 1
 				reputation = min(REP_MAX, reputation + REP_PER_TURNAROUND)
-				add_log("%s turnaround complete. +$%d" % [p["callsign"], p["payout"]])
+				add_log("%s turnaround complete. +%s" % [p["callsign"], money_str(take)])
 				credit_contracts(p)
+				release_service(p)
 				p["state"] = "AWAIT_DEPART"
 				p["state_timer"] = 0.0
 
@@ -780,7 +994,7 @@ func apply_tool_at(cell: Vector2i) -> void:
 			if not grid.can_place_taxiway(cell):
 				return
 			if money < COST_TAXIWAY:
-				add_log("Not enough money for taxiway ($%d)." % COST_TAXIWAY)
+				add_log("Not enough cash for taxiway (%s)." % money_str(COST_TAXIWAY))
 				return
 			money -= COST_TAXIWAY
 			grid.place_taxiway(cell)
@@ -792,14 +1006,14 @@ func apply_tool_at(cell: Vector2i) -> void:
 				return
 			var gate_cost: int = COST_GATE_TILE * size
 			if money < gate_cost:
-				add_log("Not enough money for that stand ($%d)." % gate_cost)
+				add_log("Not enough cash for that stand (%s)." % money_str(gate_cost))
 				return
 			money -= gate_cost
 			var id := grid.place_gate(cells, size)
 			var kind := "widebody stand" if size >= 2 else "stand"
 			var gate = grid.get_gate(id)
 			if grid.gate_is_connected(gate):
-				add_log("Built Gate %d (%s) for $%d." % [id + 1, kind, gate_cost])
+				add_log("Built Gate %d (%s) for %s." % [id + 1, kind, money_str(gate_cost)])
 			else:
 				add_log("Built Gate %d — NOT connected to a taxiway, no flights will use it." % (id + 1))
 
@@ -811,7 +1025,7 @@ func apply_tool_at(cell: Vector2i) -> void:
 			var refund := int(round(tile_cost(preview["type"]) * preview["tiles"] * REFUND_RATE))
 			grid.demolish(cell)
 			money += refund
-			add_log("Demolished %d tile(s), refunded $%d." % [preview["tiles"], refund])
+			add_log("Demolished %d tile(s), recovered %s." % [preview["tiles"], money_str(refund)])
 
 
 func commit_runway(from: Vector2i, to: Vector2i) -> void:
@@ -821,17 +1035,17 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 		return
 	var cost: int = COST_RUNWAY_TILE * cells.size()
 	if money < cost:
-		add_log("Not enough money — that runway costs $%d." % cost)
+		add_log("Not enough cash — that runway costs %s." % money_str(cost))
 		return
 	money -= cost
 	var id := grid.place_runway(cells)
 	var runway = grid.get_runway(id)
 	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
-		add_log("Built Runway %d for $%d — TOO SHORT (needs %s)." % [id + 1, cost, length_str(AirportGrid.MIN_RUNWAY_LEN)])
+		add_log("Built Runway %d for %s — TOO SHORT (needs %s)." % [id + 1, money_str(cost), length_str(AirportGrid.MIN_RUNWAY_LEN)])
 	elif not grid.runway_is_usable(runway):
-		add_log("Built Runway %d for $%d — no taxiway connection yet." % [id + 1, cost])
+		add_log("Built Runway %d for %s — no taxiway connection yet." % [id + 1, money_str(cost)])
 	else:
-		add_log("Built Runway %d for $%d." % [id + 1, cost])
+		add_log("Built Runway %d for %s." % [id + 1, money_str(cost)])
 
 
 func tool_gate_size() -> int:
@@ -953,6 +1167,7 @@ func _process(delta: float) -> void:
 		if reputation <= 0:
 			_end_run()
 	_update_hud()
+	_update_ops_ui()
 	_update_contract_ui()
 	queue_redraw()
 
@@ -970,25 +1185,36 @@ func _end_run() -> void:
 		+ "Flights served:  %d\n" % served
 		+ "Flights lost:    %d\n" % diverted
 		+ "On-time rate:    %.0f%%\n" % rate
-		+ "Total earned:    $%d" % earned
+		+ "Total earned:    %s" % money_str(earned)
 	)
 	$UI/GameOverPanel.visible = true
 	add_log("GAME OVER — reputation hit zero after %d:%02d." % [minutes, seconds])
 
 
+# The tower caps concurrent airborne traffic, so tower capacity is the thing
+# that decides how many inbound flights the airport can accept at all.
+func _try_spawn() -> void:
+	if airborne_count() >= capacity("tower"):
+		next_spawn_at = time_elapsed + 2.0
+		return
+	spawn_plane()
+	# Ramp over 5 minutes so rising traffic tracks the fleet getting heavier.
+	var tightness: float = max(0.0, 1.0 - time_elapsed / 300.0)
+	var min_gap := 3.0 + 3.0 * tightness
+	var max_gap := 6.0 + 4.0 * tightness
+	next_spawn_at = time_elapsed + min_gap + randf() * (max_gap - min_gap)
+
+
 func _simulate(dt: float) -> void:
 	time_elapsed += dt
+	day_time += dt
+	if day_time >= DAY_LENGTH:
+		day_time -= DAY_LENGTH
+		end_of_day()
 	update_contracts()
 
 	if time_elapsed >= next_spawn_at:
-		spawn_plane()
-		# Ramp over 5 minutes so rising traffic tracks the fleet getting heavier.
-		# At 3 minutes it peaked just before widebodies arrived, stacking two
-		# difficulty spikes on top of each other.
-		var tightness: float = max(0.0, 1.0 - time_elapsed / 300.0)
-		var min_gap := 3.0 + 3.0 * tightness
-		var max_gap := 6.0 + 4.0 * tightness
-		next_spawn_at = time_elapsed + min_gap + randf() * (max_gap - min_gap)
+		_try_spawn()
 
 	for p in planes:
 		if p["state"] != "REMOVE":
@@ -996,6 +1222,7 @@ func _simulate(dt: float) -> void:
 	for p in planes:
 		if p["state"] == "REMOVE":
 			grid.release_all(p["id"])
+			release_service(p)
 	planes = planes.filter(func(p): return p["state"] != "REMOVE")
 
 
@@ -1015,6 +1242,9 @@ func save_game() -> void:
 		"money": money, "reputation": reputation, "time_elapsed": time_elapsed,
 		"served": served, "diverted": diverted, "earned": earned,
 		"next_spawn_at": next_spawn_at, "plane_id_seq": plane_id_seq,
+		"day": day, "day_time": day_time, "day_revenue": day_revenue,
+		"last_day_revenue": last_day_revenue, "last_upkeep": last_upkeep,
+		"facilities": facilities.duplicate(),
 		"contracts": contracts.duplicate(true),
 		"offer": null if offer == null else offer.duplicate(true),
 		"next_offer_at": next_offer_at,
@@ -1051,6 +1281,15 @@ func load_game() -> void:
 	earned = d["earned"]
 	next_spawn_at = d["next_spawn_at"]
 	plane_id_seq = d["plane_id_seq"]
+	day = d["day"]
+	day_time = d["day_time"]
+	day_revenue = d["day_revenue"]
+	last_day_revenue = d["last_day_revenue"]
+	last_upkeep = d["last_upkeep"]
+	facilities = d["facilities"]
+	# No aircraft are restored, so nothing is holding ground support.
+	for k in used:
+		used[k] = 0
 	contracts = d["contracts"]
 	offer = d["offer"]
 	next_offer_at = d["next_offer_at"]
@@ -1061,7 +1300,7 @@ func load_game() -> void:
 
 
 func _refresh_save_buttons() -> void:
-	$UI/ContractPanel/LoadBtn.disabled = not FileAccess.file_exists(SAVE_PATH)
+	$UI/RoutePanel/LoadBtn.disabled = not FileAccess.file_exists(SAVE_PATH)
 
 
 # GDScript has no thousands separator, and "10800 ft" reads badly.
@@ -1077,6 +1316,17 @@ func _grouped(n: int) -> String:
 	return out
 
 
+# Airport money runs to tens of millions, so raw digits are unreadable.
+func money_str(v: int) -> String:
+	var sign_txt := "-" if v < 0 else ""
+	var a: int = absi(v)
+	if a >= 1_000_000:
+		return "%s$%.1fM" % [sign_txt, a / 1_000_000.0]
+	if a >= 10_000:
+		return "%s$%.0fk" % [sign_txt, a / 1_000.0]
+	return "%s$%s" % [sign_txt, _grouped(a)]
+
+
 func length_str(tiles: int) -> String:
 	return "%s %s" % [_grouped(tiles * FEET_PER_TILE), LENGTH_UNIT]
 
@@ -1088,36 +1338,58 @@ func _class_requirements() -> String:
 	return "Needs: " + " / ".join(parts) + " " + LENGTH_UNIT
 
 
+func _update_ops_ui() -> void:
+	var left := int(max(0.0, DAY_LENGTH - day_time))
+	day_label.text = "Day %d · %ds to close" % [day, left]
+
+	capacity_label.text = "Airborne %d/%d · Crew %d/%d · Fuel %d/%d\nTerminal %d/%d · Checks %d/%d\nUpkeep %s/day\nLast day: %s in, %s out" % [
+		airborne_count(), capacity("tower"),
+		used["crew"], capacity("crew"),
+		used["fuel"], capacity("fuel"),
+		used["term"], capacity("term"),
+		used["mech"], capacity("mech"),
+		money_str(total_upkeep()),
+		money_str(last_day_revenue), money_str(last_upkeep),
+	]
+
+	for i in FACILITIES.size():
+		var f: Dictionary = FACILITIES[i]
+		var key: String = f["key"]
+		var n: int = facilities.get(key, 0)
+		var lbl: Label = $UI/FacilityPanel.get_node("Row%dLabel" % i)
+		lbl.text = "%s  x%d\n%d %s · %s · %s/day" % [
+			f["name"], n, capacity(key), f["unit"],
+			money_str(f["cost"]), money_str(f["upkeep"]),
+		]
+		$UI/FacilityPanel.get_node("Row%dBuy" % i).disabled = money < int(f["cost"])
+		$UI/FacilityPanel.get_node("Row%dSell" % i).disabled = n <= 0
+
+
 func _update_contract_ui() -> void:
-	var offer_label: Label = $UI/ContractPanel/OfferLabel
-	var active_label: Label = $UI/ContractPanel/ActiveLabel
+	var offer_label: Label = $UI/RoutePanel/OfferLabel
+	var active_label: Label = $UI/RoutePanel/ActiveLabel
 	var full := contracts.size() >= MAX_CONTRACTS
 
 	if offer == null:
 		offer_label.text = "No offers right now.\n\nNext approach in %ds." % int(max(0.0, next_offer_at - time_elapsed))
 	else:
 		var cls: Dictionary = CLASSES[offer["size"]]
+		# Kept to five lines: the label has to clear the Sign/Pass buttons below it.
 		var lines := [
 			"%s wants a deal:" % offer["airline"],
-			"",
-			"%d x %s" % [offer["count"], cls["name"]],
-			"within %ds" % int(offer["duration"]),
-			"pays $%d bonus" % offer["reward"],
-			"fail: -%d reputation" % offer["penalty"],
-			"",
-			"Needs %s runway + %s stand." % [length_str(cls["min_runway"]), "widebody" if cls["gate_size"] >= 2 else "small"],
+			"%d x %s within %ds" % [offer["count"], cls["name"], int(offer["duration"])],
+			"Pays %s bonus · fail -%d rep" % [money_str(offer["reward"]), offer["penalty"]],
+			"Needs %s + %s stand" % [length_str(cls["min_runway"]), "widebody" if cls["gate_size"] >= 2 else "small"],
 		]
 		if not can_handle_class(offer["size"]):
-			lines.append("")
-			lines.append("!! Your airport cannot handle this yet.")
+			lines.append("!! Airport can't handle this yet")
 		elif full:
-			lines.append("")
-			lines.append("!! Contract slots full.")
+			lines.append("!! Contract slots full")
 		offer_label.text = "\n".join(lines)
 
-	$UI/ContractPanel/AcceptBtn.visible = offer != null
-	$UI/ContractPanel/DeclineBtn.visible = offer != null
-	$UI/ContractPanel/AcceptBtn.disabled = full
+	$UI/RoutePanel/AcceptBtn.visible = offer != null
+	$UI/RoutePanel/DeclineBtn.visible = offer != null
+	$UI/RoutePanel/AcceptBtn.disabled = full
 
 	if contracts.is_empty():
 		active_label.text = "Signed: none."
@@ -1128,12 +1400,12 @@ func _update_contract_ui() -> void:
 			parts.append("%s — %d/%d %s" % [
 				c["airline"], c["progress"], c["count"], CLASSES[c["size"]]["code"],
 			])
-			parts.append("  %ds left · $%d" % [int(max(0.0, c["deadline"] - time_elapsed)), c["reward"]])
+			parts.append("  %ds left · %s" % [int(max(0.0, c["deadline"] - time_elapsed)), money_str(c["reward"])])
 		active_label.text = "\n".join(parts)
 
 
 func _update_hud() -> void:
-	money_label.text = "Money: $%d" % money
+	money_label.text = "Cash: %s" % money_str(money)
 	rep_label.text = "Reputation: %d" % reputation
 	# Reputation is the lose condition, so make it shout before it runs out.
 	if reputation < 25:
@@ -1172,7 +1444,7 @@ func _update_hud() -> void:
 			tool_info_label.text = "Demolish refunds %d%%" % int(REFUND_RATE * 100)
 		Tool.TAXIWAY:
 			hint_label.text = "TAXIWAY — click or drag to paint.\nGates and runways need a taxiway connection."
-			tool_info_label.text = "$%d per tile" % COST_TAXIWAY
+			tool_info_label.text = "%s per tile" % money_str(COST_TAXIWAY)
 		Tool.RUNWAY:
 			hint_label.text = "RUNWAY — drag a straight line. 1 tile = %d %s\n%s" % [
 				FEET_PER_TILE, LENGTH_UNIT, _class_requirements(),
@@ -1183,15 +1455,15 @@ func _update_hud() -> void:
 				var n: int = grid.line_cells(drag_start, hover_cell).size()
 				var cap := _runway_capability(n)
 				var takes := "too short" if cap == "-" else "takes " + cap
-				tool_info_label.text = "%s · %s · $%d" % [length_str(n), takes, COST_RUNWAY_TILE * n]
+				tool_info_label.text = "%s · %s · %s" % [length_str(n), takes, money_str(COST_RUNWAY_TILE * n)]
 			else:
-				tool_info_label.text = "$%d per tile" % COST_RUNWAY_TILE
+				tool_info_label.text = "%s per tile" % money_str(COST_RUNWAY_TILE)
 		Tool.GATE_SMALL:
 			hint_label.text = "STAND (small) — 1 tile, next to a taxiway.\nTakes Light and Narrowbody."
-			tool_info_label.text = "$%d" % COST_GATE_TILE
+			tool_info_label.text = money_str(COST_GATE_TILE)
 		Tool.GATE_LARGE:
 			hint_label.text = "STAND (widebody) — 2 tiles wide.\nTakes any aircraft, including Widebody."
-			tool_info_label.text = "$%d" % (COST_GATE_TILE * 2)
+			tool_info_label.text = money_str(COST_GATE_TILE * 2)
 		Tool.DEMOLISH:
 			hint_label.text = "DEMOLISH — click to remove.\nOccupied gates and runways can't be removed."
 			tool_info_label.text = "Refunds %d%%" % int(REFUND_RATE * 100)
@@ -1384,4 +1656,4 @@ func _draw_ghost() -> void:
 	if tool == Tool.RUNWAY and cells.size() > 1:
 		var cost := COST_RUNWAY_TILE * cells.size()
 		var anchor := grid.cell_to_world(cells[0]) + Vector2(-10, -16)
-		draw_string(ThemeDB.fallback_font, anchor, "%s — $%d" % [length_str(cells.size()), cost], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1))
+		draw_string(ThemeDB.fallback_font, anchor, "%s — %s" % [length_str(cells.size()), money_str(cost)], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1))

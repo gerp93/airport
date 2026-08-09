@@ -3,9 +3,9 @@ extends RefCounted
 enum TileType { EMPTY, TAXIWAY, RUNWAY, GATE }
 
 const COLS := 32
-const ROWS := 16
+const ROWS := 18
 const TILE := 32.0
-const ORIGIN := Vector2(0.0, 88.0)
+const ORIGIN := Vector2(0.0, 96.0)
 const MIN_RUNWAY_LEN := 6
 const RUNWAY_WEIGHT := 8.0
 const NOWHERE := Vector2i(-1, -1)
