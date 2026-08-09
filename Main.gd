@@ -46,6 +46,9 @@ const FLY_SPEED := 220.0
 
 const REPATH_INTERVAL := 1.5
 const MAX_BLOCK_TIME := 20.0
+# Reputation has to be recoverable, or the game is just a countdown to losing.
+const REP_PER_TURNAROUND := 1
+const REP_MAX := 100
 
 const SPAWN_POS := Vector2(-60.0, 150.0)
 const AIR_ANCHOR := Vector2(110.0, 160.0)
@@ -53,6 +56,10 @@ const AIR_ANCHOR := Vector2(110.0, 160.0)
 var grid: AirportGrid
 var money := 300
 var reputation := 100
+var game_over := false
+var served := 0
+var diverted := 0
+var earned := 0
 var time_elapsed := 0.0
 var next_spawn_at := 5.0
 var plane_id_seq := 1
@@ -96,6 +103,7 @@ func _ready() -> void:
 	$UI/Speed1Btn.pressed.connect(_set_speed.bind(1.0))
 	$UI/Speed2Btn.pressed.connect(_set_speed.bind(2.0))
 	$UI/Speed3Btn.pressed.connect(_set_speed.bind(4.0))
+	$UI/GameOverPanel/RestartBtn.pressed.connect(func(): get_tree().reload_current_scene())
 
 	add_log("Airport open. Build taxiways to connect runways and gates.")
 
@@ -189,6 +197,9 @@ func spawn_plane() -> void:
 		"hold_timer": 0.0, "max_hold": 18.0,
 		"blocked_timer": 0.0, "repath_timer": 0.0,
 		"state_timer": 0.0, "turnaround": cls["turnaround"],
+		# Each aircraft gets its own hold pattern so a stack of waiting traffic
+		# doesn't collapse into one unreadable blob.
+		"orbit_phase": randf() * TAU, "orbit_radius": 26.0 + randf() * 26.0,
 	})
 	add_log("%s inbound — %s, contract $%d." % [callsign, cls["name"], payout])
 	plane_id_seq += 1
@@ -301,6 +312,7 @@ func release_plane(p: Dictionary) -> void:
 
 func divert(p: Dictionary, reason: String, rep_cost: int) -> void:
 	reputation = max(0, reputation - rep_cost)
+	diverted += 1
 	add_log("%s DIVERTED — %s. Reputation -%d." % [p["callsign"], reason, rep_cost])
 	release_plane(p)
 
@@ -429,8 +441,9 @@ func update_plane(p: Dictionary, dt: float) -> void:
 	match p["state"]:
 		"AIR_HOLD":
 			p["air_hold_timer"] += dt
-			var t: float = p["air_hold_timer"] * 1.5
-			var orbit := AIR_ANCHOR + Vector2(sin(t) * 34.0, cos(t) * 22.0)
+			var t: float = p["air_hold_timer"] * 1.2 + p["orbit_phase"]
+			var r: float = p["orbit_radius"]
+			var orbit := AIR_ANCHOR + Vector2(sin(t) * r, cos(t) * r * 0.6)
 			p["heading"] = (orbit - p["pos"]).angle()
 			p["pos"] = p["pos"].move_toward(orbit, FLY_SPEED * dt)
 
@@ -552,6 +565,9 @@ func update_plane(p: Dictionary, dt: float) -> void:
 		"AT_GATE":
 			if p["state_timer"] >= p["turnaround"]:
 				money += p["payout"]
+				earned += p["payout"]
+				served += 1
+				reputation = min(REP_MAX, reputation + REP_PER_TURNAROUND)
 				add_log("%s turnaround complete. +$%d" % [p["callsign"], p["payout"]])
 				p["state"] = "AWAIT_DEPART"
 				p["state_timer"] = 0.0
@@ -712,6 +728,9 @@ func tile_cost(type: int) -> int:
 # --- input ---
 
 func _unhandled_input(event: InputEvent) -> void:
+	if game_over:
+		return
+
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_SPACE:
@@ -788,11 +807,32 @@ func _handle_select_click(pos: Vector2, cell: Vector2i) -> void:
 
 func _process(delta: float) -> void:
 	# Building stays fully usable while paused, so only the simulation is gated.
-	var dt := 0.0 if paused else delta * speed
+	var dt := 0.0 if (paused or game_over) else delta * speed
 	if dt > 0.0:
 		_simulate(dt)
+		if reputation <= 0:
+			_end_run()
 	_update_hud()
 	queue_redraw()
+
+
+func _end_run() -> void:
+	game_over = true
+	var minutes := int(time_elapsed) / 60
+	var seconds := int(time_elapsed) % 60
+	var handled := served + diverted
+	var rate := 0.0 if handled == 0 else 100.0 * float(served) / float(handled)
+	$UI/GameOverPanel/GameOverLabel.text = (
+		"AIRPORT SHUT DOWN\n\n"
+		+ "The airline authority pulled your licence after\ntoo many diverted flights.\n\n"
+		+ "Survived:        %d:%02d\n" % [minutes, seconds]
+		+ "Flights served:  %d\n" % served
+		+ "Flights lost:    %d\n" % diverted
+		+ "On-time rate:    %.0f%%\n" % rate
+		+ "Total earned:    $%d" % earned
+	)
+	$UI/GameOverPanel.visible = true
+	add_log("GAME OVER — reputation hit zero after %d:%02d." % [minutes, seconds])
 
 
 func _simulate(dt: float) -> void:
@@ -842,9 +882,10 @@ func _update_hud() -> void:
 	for r in grid.runways:
 		if grid.runway_is_usable(r):
 			longest = max(longest, r["cells"].size())
-	stats_label.text = "Runways: %d (%d usable, longest %dt → %s)\nStands: %d connected of %d (%d widebody)\nAircraft: %d" % [
+	stats_label.text = "Runways: %d (%d usable, longest %dt → %s)\nStands: %d connected of %d (%d widebody)\nAircraft: %d\nServed: %d   Lost: %d" % [
 		grid.runways.size(), usable_runways, longest, _runway_capability(longest),
 		connected_gates, grid.gates.size(), wide_stands, planes.size(),
+		served, diverted,
 	]
 
 	match tool:

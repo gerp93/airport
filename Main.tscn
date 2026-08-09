@@ -1,10 +1,34 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://Main.gd" id="1_main"]
 
 [sub_resource type="ButtonGroup" id="ButtonGroup_tools"]
 
 [sub_resource type="ButtonGroup" id="ButtonGroup_speed"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_gameover"]
+bg_color = Color(0.08, 0.1, 0.12, 0.98)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.88, 0.38, 0.33, 1)
+corner_radius_top_left = 6
+corner_radius_top_right = 6
+corner_radius_bottom_right = 6
+corner_radius_bottom_left = 6
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_restart"]
+bg_color = Color(0.16, 0.42, 0.24, 1)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.55, 0.88, 0.6, 1)
+corner_radius_top_left = 4
+corner_radius_top_right = 4
+corner_radius_bottom_right = 4
+corner_radius_bottom_left = 4
 
 [node name="Main" type="Node2D"]
 script = ExtResource("1_main")
@@ -156,6 +180,33 @@ offset_right = 995.0
 offset_bottom = 632.0
 horizontal_alignment = 2
 text = "Click a plane to inspect its route."
+
+[node name="GameOverPanel" type="Panel" parent="UI"]
+visible = false
+offset_left = 390.0
+offset_top = 195.0
+offset_right = 890.0
+offset_bottom = 525.0
+theme_override_styles/panel = SubResource("StyleBoxFlat_gameover")
+
+[node name="GameOverLabel" type="Label" parent="UI/GameOverPanel"]
+offset_left = 26.0
+offset_top = 20.0
+offset_right = 474.0
+offset_bottom = 276.0
+theme_override_font_sizes/font_size = 17
+text = ""
+
+[node name="RestartBtn" type="Button" parent="UI/GameOverPanel"]
+offset_left = 175.0
+offset_top = 285.0
+offset_right = 325.0
+offset_bottom = 319.0
+focus_mode = 0
+theme_override_styles/normal = SubResource("StyleBoxFlat_restart")
+theme_override_styles/hover = SubResource("StyleBoxFlat_restart")
+theme_override_styles/pressed = SubResource("StyleBoxFlat_restart")
+text = "New airport"
 
 [node name="LogLabel" type="RichTextLabel" parent="UI"]
 offset_left = 10.0
