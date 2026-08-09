@@ -33,6 +33,13 @@ const CLASSES := [
 	},
 ]
 
+# Runway lengths are shown to the player in feet. ICAO standardises on metres
+# for aerodrome dimensions, but feet is the US/FAA convention and gives the
+# recognisable landmark numbers (7,200 ft, 10,800 ft) this genre trades on.
+# Switch this pair to convert the whole UI to metres.
+const FEET_PER_TILE := 600
+const LENGTH_UNIT := "ft"
+
 const COST_TAXIWAY := 15
 const COST_RUNWAY_TILE := 40
 const COST_GATE_TILE := 250
@@ -576,8 +583,8 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				if not grid.has_usable_runway():
 					reason = "no usable runway"
 				elif not any_runway_fits(p):
-					reason = "no runway long enough for a %s (needs %d tiles)" % [
-						class_of(p)["name"].to_lower(), class_of(p)["min_runway"],
+					reason = "no runway long enough for a %s (needs %s)" % [
+						class_of(p)["name"].to_lower(), length_str(class_of(p)["min_runway"]),
 					]
 				elif not any_gate_fits(p):
 					reason = "no stand big enough for a %s" % class_of(p)["name"].to_lower()
@@ -820,7 +827,7 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 	var id := grid.place_runway(cells)
 	var runway = grid.get_runway(id)
 	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
-		add_log("Built Runway %d for $%d — TOO SHORT (needs %d tiles)." % [id + 1, cost, AirportGrid.MIN_RUNWAY_LEN])
+		add_log("Built Runway %d for $%d — TOO SHORT (needs %s)." % [id + 1, cost, length_str(AirportGrid.MIN_RUNWAY_LEN)])
 	elif not grid.runway_is_usable(runway):
 		add_log("Built Runway %d for $%d — no taxiway connection yet." % [id + 1, cost])
 	else:
@@ -1057,11 +1064,28 @@ func _refresh_save_buttons() -> void:
 	$UI/ContractPanel/LoadBtn.disabled = not FileAccess.file_exists(SAVE_PATH)
 
 
+# GDScript has no thousands separator, and "10800 ft" reads badly.
+func _grouped(n: int) -> String:
+	var s := str(n)
+	var out := ""
+	var count := 0
+	for i in range(s.length() - 1, -1, -1):
+		out = s[i] + out
+		count += 1
+		if count % 3 == 0 and i > 0:
+			out = "," + out
+	return out
+
+
+func length_str(tiles: int) -> String:
+	return "%s %s" % [_grouped(tiles * FEET_PER_TILE), LENGTH_UNIT]
+
+
 func _class_requirements() -> String:
 	var parts := []
 	for c in CLASSES:
-		parts.append("%s %dt" % [c["code"], c["min_runway"]])
-	return "Needs: " + ", ".join(parts)
+		parts.append("%s %s" % [c["code"], _grouped(c["min_runway"] * FEET_PER_TILE)])
+	return "Needs: " + " / ".join(parts) + " " + LENGTH_UNIT
 
 
 func _update_contract_ui() -> void:
@@ -1081,7 +1105,7 @@ func _update_contract_ui() -> void:
 			"pays $%d bonus" % offer["reward"],
 			"fail: -%d reputation" % offer["penalty"],
 			"",
-			"Needs %dt runway + %s stand." % [cls["min_runway"], "widebody" if cls["gate_size"] >= 2 else "small"],
+			"Needs %s runway + %s stand." % [length_str(cls["min_runway"]), "widebody" if cls["gate_size"] >= 2 else "small"],
 		]
 		if not can_handle_class(offer["size"]):
 			lines.append("")
@@ -1136,8 +1160,8 @@ func _update_hud() -> void:
 	for r in grid.runways:
 		if grid.runway_is_usable(r):
 			longest = max(longest, r["cells"].size())
-	stats_label.text = "Runways: %d (%d usable, longest %dt → %s)\nStands: %d connected of %d (%d widebody)\nAircraft: %d\nServed: %d   Lost: %d" % [
-		grid.runways.size(), usable_runways, longest, _runway_capability(longest),
+	stats_label.text = "Runways: %d (%d usable, longest %s → %s)\nStands: %d connected of %d (%d widebody)\nAircraft: %d\nServed: %d   Lost: %d" % [
+		grid.runways.size(), usable_runways, length_str(longest), _runway_capability(longest),
 		connected_gates, grid.gates.size(), wide_stands, planes.size(),
 		served, diverted,
 	]
@@ -1150,8 +1174,18 @@ func _update_hud() -> void:
 			hint_label.text = "TAXIWAY — click or drag to paint.\nGates and runways need a taxiway connection."
 			tool_info_label.text = "$%d per tile" % COST_TAXIWAY
 		Tool.RUNWAY:
-			hint_label.text = "RUNWAY — drag a straight line.\n%s" % _class_requirements()
-			tool_info_label.text = "$%d per tile" % COST_RUNWAY_TILE
+			hint_label.text = "RUNWAY — drag a straight line. 1 tile = %d %s\n%s" % [
+				FEET_PER_TILE, LENGTH_UNIT, _class_requirements(),
+			]
+			# Live length while dragging — you need to know when you cross a
+			# class threshold, not after you've paid for the runway.
+			if is_dragging and grid.in_bounds(drag_start) and grid.in_bounds(hover_cell):
+				var n: int = grid.line_cells(drag_start, hover_cell).size()
+				var cap := _runway_capability(n)
+				var takes := "too short" if cap == "-" else "takes " + cap
+				tool_info_label.text = "%s · %s · $%d" % [length_str(n), takes, COST_RUNWAY_TILE * n]
+			else:
+				tool_info_label.text = "$%d per tile" % COST_RUNWAY_TILE
 		Tool.GATE_SMALL:
 			hint_label.text = "STAND (small) — 1 tile, next to a taxiway.\nTakes Light and Narrowbody."
 			tool_info_label.text = "$%d" % COST_GATE_TILE
@@ -1232,7 +1266,7 @@ func _draw_runway(r: Dictionary) -> void:
 		for c in cells:
 			draw_rect(_cell_rect(c), Color(1.0, 0.35, 0.35, 0.9), false, 1.0)
 
-	var label := "RWY %d · %dt · %s" % [r["id"] + 1, cells.size(), _runway_capability(cells.size())]
+	var label := "RWY %d · %s · %s" % [r["id"] + 1, length_str(cells.size()), _runway_capability(cells.size())]
 	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
 		label += " (TOO SHORT)"
 	elif not usable:
@@ -1350,4 +1384,4 @@ func _draw_ghost() -> void:
 	if tool == Tool.RUNWAY and cells.size() > 1:
 		var cost := COST_RUNWAY_TILE * cells.size()
 		var anchor := grid.cell_to_world(cells[0]) + Vector2(-10, -16)
-		draw_string(ThemeDB.fallback_font, anchor, "%d tiles — $%d" % [cells.size(), cost], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1))
+		draw_string(ThemeDB.fallback_font, anchor, "%s — $%d" % [length_str(cells.size()), cost], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1))

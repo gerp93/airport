@@ -23,14 +23,20 @@ find a detour.
 
 | Class | Runway | Stand | Payout | Turnaround |
 |---|---|---|---|---|
-| Light | 6 tiles | small | ~$75 | 4s |
-| Narrowbody | 12 tiles | small | ~$195 | 8s |
-| Widebody | 18 tiles | widebody | ~$400 | 13s |
+| Light | 3,600 ft (6 tiles) | small | ~$75 | 4s |
+| Narrowbody | 7,200 ft (12 tiles) | small | ~$195 | 8s |
+| Widebody | 10,800 ft (18 tiles) | widebody | ~$400 | 13s |
+
+**One tile is 600 ft**, shown to the player on the runway tool. Runway lengths
+are displayed in feet: ICAO standardises on metres for aerodrome dimensions,
+but feet is the US/FAA convention and gives the recognisable landmark numbers
+this genre trades on. `FEET_PER_TILE` and `LENGTH_UNIT` in `Main.gd` convert
+the whole UI if you'd rather have metres — the tile math is unaffected.
 
 The fleet mix shifts from Light to Narrowbody to Widebody over the first
-several minutes. The starter runway is 16 tiles on purpose — it handles
-narrowbodies but not widebodies, so the first widebody on approach is what
-tells you to invest in a longer runway.
+several minutes. The starter runway is 9,600 ft on purpose — it handles
+narrowbodies but is two tiles short of a widebody, so the first widebody on
+approach is what tells you to invest in a longer runway.
 
 Aircraft are never cleared to land unless a long-enough runway *and* a
 big-enough stand exist, so you get "no runway long enough for a widebody"
