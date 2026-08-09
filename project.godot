@@ -31,3 +31,7 @@ window/size/viewport_height=900
 
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+; Required for the macOS export preset (universal/arm64) — Godot refuses to
+; export for arm64 without this, even though the project has no textures to
+; compress (everything is drawn via _draw(), see CLAUDE.md).
+textures/vram_compression/import_etc2_astc=true
