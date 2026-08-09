@@ -51,7 +51,7 @@ text = "Select a holding plane, then a free gate."
 [node name="SelectBtn" type="Button" parent="UI"]
 offset_left = 10.0
 offset_top = 606.0
-offset_right = 140.0
+offset_right = 120.0
 offset_bottom = 636.0
 focus_mode = 0
 toggle_mode = true
@@ -60,9 +60,9 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Select"
 
 [node name="TaxiwayBtn" type="Button" parent="UI"]
-offset_left = 148.0
+offset_left = 126.0
 offset_top = 606.0
-offset_right = 278.0
+offset_right = 236.0
 offset_bottom = 636.0
 focus_mode = 0
 toggle_mode = true
@@ -70,29 +70,39 @@ button_group = SubResource("ButtonGroup_tools")
 text = "Taxiway"
 
 [node name="RunwayBtn" type="Button" parent="UI"]
-offset_left = 286.0
+offset_left = 242.0
 offset_top = 606.0
-offset_right = 416.0
+offset_right = 352.0
 offset_bottom = 636.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
 text = "Runway"
 
-[node name="GateBtn" type="Button" parent="UI"]
-offset_left = 424.0
+[node name="GateSmallBtn" type="Button" parent="UI"]
+offset_left = 358.0
 offset_top = 606.0
-offset_right = 554.0
+offset_right = 468.0
 offset_bottom = 636.0
 focus_mode = 0
 toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
-text = "Gate"
+text = "Stand S"
+
+[node name="GateLargeBtn" type="Button" parent="UI"]
+offset_left = 474.0
+offset_top = 606.0
+offset_right = 584.0
+offset_bottom = 636.0
+focus_mode = 0
+toggle_mode = true
+button_group = SubResource("ButtonGroup_tools")
+text = "Stand W"
 
 [node name="DemolishBtn" type="Button" parent="UI"]
-offset_left = 562.0
+offset_left = 590.0
 offset_top = 606.0
-offset_right = 692.0
+offset_right = 700.0
 offset_bottom = 636.0
 focus_mode = 0
 toggle_mode = true

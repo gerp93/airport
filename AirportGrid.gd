@@ -6,7 +6,7 @@ const COLS := 40
 const ROWS := 16
 const TILE := 32.0
 const ORIGIN := Vector2(0.0, 88.0)
-const MIN_RUNWAY_LEN := 8
+const MIN_RUNWAY_LEN := 6
 const RUNWAY_WEIGHT := 8.0
 const NOWHERE := Vector2i(-1, -1)
 
@@ -129,16 +129,29 @@ func place_runway(cells: Array) -> int:
 	return id
 
 
-func can_place_gate(c: Vector2i) -> bool:
-	return in_bounds(c) and tile_type(c) == TileType.EMPTY
+# A gate spans `size` tiles to the right of its anchor: 1 for a small stand,
+# 2 for a widebody stand.
+func gate_cells_for(anchor: Vector2i, size: int) -> Array:
+	var cells := []
+	for i in size:
+		cells.append(anchor + Vector2i(i, 0))
+	return cells
 
 
-func place_gate(c: Vector2i) -> int:
+func can_place_gate(cells: Array) -> bool:
+	for c in cells:
+		if not in_bounds(c) or tile_type(c) != TileType.EMPTY:
+			return false
+	return not cells.is_empty()
+
+
+func place_gate(cells: Array, size: int) -> int:
 	var id := _gate_seq
 	_gate_seq += 1
-	gates.append({"id": id, "cell": c, "occupied": false})
-	tiles[c] = {"type": TileType.GATE, "entity_id": id}
-	_refresh_cell(c)
+	gates.append({"id": id, "cells": cells.duplicate(), "size": size, "occupied": false})
+	for c in cells:
+		tiles[c] = {"type": TileType.GATE, "entity_id": id}
+		_refresh_cell(c)
 	return id
 
 
@@ -173,10 +186,16 @@ func get_gate(id: int) -> Variant:
 # --- usability ---
 
 func gate_is_connected(g: Dictionary) -> bool:
-	for n in neighbors(g["cell"]):
-		if tile_type(n) == TileType.TAXIWAY:
-			return true
-	return false
+	return gate_park_cell(g) != NOWHERE
+
+
+# Planes park on whichever of the gate's tiles touches a taxiway.
+func gate_park_cell(g: Dictionary) -> Vector2i:
+	for c in g["cells"]:
+		for n in neighbors(c):
+			if tile_type(n) == TileType.TAXIWAY:
+				return c
+	return NOWHERE
 
 
 func runway_is_usable(r: Dictionary) -> bool:
@@ -326,9 +345,12 @@ func demolish_preview(c: Vector2i) -> Dictionary:
 			return {"type": t, "tiles": 1, "cells": [c]}
 		TileType.GATE:
 			var g = gate_at(c)
-			if g == null or g["occupied"] or claims.has(c):
+			if g == null or g["occupied"]:
 				return {}
-			return {"type": t, "tiles": 1, "cells": [c]}
+			for gc in g["cells"]:
+				if claims.has(gc):
+					return {}
+			return {"type": t, "tiles": g["cells"].size(), "cells": g["cells"].duplicate()}
 		TileType.RUNWAY:
 			var r = runway_at(c)
 			if r == null or r["occupied"]:
@@ -375,4 +397,4 @@ func seed_starter_airport() -> void:
 		place_taxiway(Vector2i(8, y))
 		place_taxiway(Vector2i(20, y))
 	for x in [10, 13, 16]:
-		place_gate(Vector2i(x, 6))
+		place_gate(gate_cells_for(Vector2i(x, 6), 1), 1)

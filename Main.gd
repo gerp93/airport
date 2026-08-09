@@ -2,22 +2,40 @@ extends Node2D
 
 const AirportGrid = preload("res://AirportGrid.gd")
 
-enum Tool { SELECT, TAXIWAY, RUNWAY, GATE, DEMOLISH }
+enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, DEMOLISH }
 
 const TOOL_BUTTONS := {
 	Tool.SELECT: "SelectBtn", Tool.TAXIWAY: "TaxiwayBtn", Tool.RUNWAY: "RunwayBtn",
-	Tool.GATE: "GateBtn", Tool.DEMOLISH: "DemolishBtn",
+	Tool.GATE_SMALL: "GateSmallBtn", Tool.GATE_LARGE: "GateLargeBtn",
+	Tool.DEMOLISH: "DemolishBtn",
 }
 const TOOL_KEYS := {
 	KEY_ESCAPE: Tool.SELECT, KEY_T: Tool.TAXIWAY, KEY_R: Tool.RUNWAY,
-	KEY_G: Tool.GATE, KEY_X: Tool.DEMOLISH,
+	KEY_G: Tool.GATE_SMALL, KEY_H: Tool.GATE_LARGE, KEY_X: Tool.DEMOLISH,
 }
 
 const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
 
+# Bigger aircraft pay much better but demand a longer runway and a wider stand,
+# so the fleet mix is what pushes the player to keep investing in the layout.
+const CLASSES := [
+	{
+		"name": "Light", "code": "L", "min_runway": 6, "gate_size": 1,
+		"pay_min": 55, "pay_max": 95, "turnaround": 4.0, "scale": 0.7,
+	},
+	{
+		"name": "Narrowbody", "code": "N", "min_runway": 12, "gate_size": 1,
+		"pay_min": 150, "pay_max": 240, "turnaround": 8.0, "scale": 1.0,
+	},
+	{
+		"name": "Widebody", "code": "W", "min_runway": 18, "gate_size": 2,
+		"pay_min": 330, "pay_max": 480, "turnaround": 13.0, "scale": 1.35,
+	},
+]
+
 const COST_TAXIWAY := 15
 const COST_RUNWAY_TILE := 40
-const COST_GATE := 250
+const COST_GATE_TILE := 250
 const REFUND_RATE := 0.5
 const TOW_FEE := 60
 
@@ -43,6 +61,8 @@ var log_lines: Array = []
 
 var paused := false
 var speed := 1.0
+# Mirrors the log to stdout for headless balance runs: --headless ... -- --echo-log
+var _echo_log := false
 
 var selected_plane_id := -1
 var tool: Tool = Tool.SELECT
@@ -61,13 +81,15 @@ var is_dragging := false
 
 func _ready() -> void:
 	randomize()
+	_echo_log = "--echo-log" in OS.get_cmdline_user_args()
 	grid = AirportGrid.new()
 	grid.seed_starter_airport()
 
 	$UI/SelectBtn.pressed.connect(_set_tool.bind(Tool.SELECT))
 	$UI/TaxiwayBtn.pressed.connect(_set_tool.bind(Tool.TAXIWAY))
 	$UI/RunwayBtn.pressed.connect(_set_tool.bind(Tool.RUNWAY))
-	$UI/GateBtn.pressed.connect(_set_tool.bind(Tool.GATE))
+	$UI/GateSmallBtn.pressed.connect(_set_tool.bind(Tool.GATE_SMALL))
+	$UI/GateLargeBtn.pressed.connect(_set_tool.bind(Tool.GATE_LARGE))
 	$UI/DemolishBtn.pressed.connect(_set_tool.bind(Tool.DEMOLISH))
 
 	$UI/PauseBtn.toggled.connect(_on_pause_toggled)
@@ -118,6 +140,8 @@ func add_log(msg: String) -> void:
 	if log_lines.size() > 40:
 		log_lines.resize(40)
 	log_label.text = "\n".join(log_lines)
+	if _echo_log:
+		print(log_lines[0])
 
 
 func find_plane(id: int) -> Variant:
@@ -129,12 +153,33 @@ func find_plane(id: int) -> Variant:
 
 # --- spawning ---
 
+# Light aircraft dominate early, narrowbodies phase in, widebodies arrive late.
+func pick_size() -> int:
+	# Narrowbodies taper off late so widebodies actually take over the schedule
+	# rather than just being sprinkled on top of it.
+	var narrow_decline := clampf(1.0 - (time_elapsed - 300.0) / 300.0, 0.35, 1.0)
+	var weights: Array[float] = [
+		max(0.15, 1.0 - time_elapsed / 200.0),
+		clamp((time_elapsed - 60.0) / 120.0, 0.0, 1.0) * narrow_decline,
+		clamp((time_elapsed - 240.0) / 180.0, 0.0, 1.0),
+	]
+	var roll := randf() * (weights[0] + weights[1] + weights[2])
+	for i in weights.size():
+		roll -= weights[i]
+		if roll <= 0.0:
+			return i
+	return 0
+
+
 func spawn_plane() -> void:
 	var airline: String = AIRLINES[randi() % AIRLINES.size()]
-	var payout := 80 + randi() % 120
+	var size := pick_size()
+	var cls: Dictionary = CLASSES[size]
+	var payout: int = cls["pay_min"] + randi() % (cls["pay_max"] - cls["pay_min"] + 1)
+	var callsign := "%s %d" % [airline, plane_id_seq]
 	planes.append({
 		"id": plane_id_seq, "airline": airline, "payout": payout,
-		"callsign": "%s %d" % [airline, plane_id_seq],
+		"size": size, "callsign": callsign,
 		"state": "AIR_HOLD",
 		"pos": SPAWN_POS, "heading": 0.0,
 		"cell": AirportGrid.NOWHERE,
@@ -143,9 +188,9 @@ func spawn_plane() -> void:
 		"air_hold_timer": 0.0, "max_air_hold": 25.0,
 		"hold_timer": 0.0, "max_hold": 18.0,
 		"blocked_timer": 0.0, "repath_timer": 0.0,
-		"state_timer": 0.0, "turnaround": 6.0,
+		"state_timer": 0.0, "turnaround": cls["turnaround"],
 	})
-	add_log("%s inbound (contract $%d)." % [planes[planes.size() - 1]["callsign"], payout])
+	add_log("%s inbound — %s, contract $%d." % [callsign, cls["name"], payout])
 	plane_id_seq += 1
 
 
@@ -262,11 +307,45 @@ func divert(p: Dictionary, reason: String, rep_cost: int) -> void:
 
 # --- gate / runway acquisition ---
 
+func class_of(p: Dictionary) -> Dictionary:
+	return CLASSES[p["size"]]
+
+
+func runway_fits(r: Dictionary, p: Dictionary) -> bool:
+	return r["cells"].size() >= class_of(p)["min_runway"]
+
+
+func gate_fits(g: Dictionary, p: Dictionary) -> bool:
+	return g["size"] >= class_of(p)["gate_size"]
+
+
+func any_runway_fits(p: Dictionary) -> bool:
+	for r in grid.runways:
+		if grid.runway_is_usable(r) and runway_fits(r, p):
+			return true
+	return false
+
+
+func any_gate_fits(p: Dictionary) -> bool:
+	for g in grid.gates:
+		if grid.gate_is_connected(g) and gate_fits(g, p):
+			return true
+	return false
+
+
+func compatible_free_gates(p: Dictionary) -> Array:
+	var out := []
+	for g in grid.usable_free_gates():
+		if gate_fits(g, p):
+			out.append(g)
+	return out
+
+
 func try_assign_gate(p: Dictionary) -> bool:
 	var best_path: Array = []
 	var best_gate = null
-	for g in grid.usable_free_gates():
-		var path := grid.find_path(p["cell"], g["cell"])
+	for g in compatible_free_gates(p):
+		var path := grid.find_path(p["cell"], grid.gate_park_cell(g))
 		if path.is_empty():
 			continue
 		if best_path.is_empty() or path.size() < best_path.size():
@@ -285,7 +364,10 @@ func try_assign_gate(p: Dictionary) -> bool:
 
 
 func assign_gate_manual(p: Dictionary, gate: Dictionary) -> void:
-	var path := grid.find_path(p["cell"], gate["cell"])
+	if not gate_fits(gate, p):
+		add_log("Gate %d is too small for a %s." % [gate["id"] + 1, class_of(p)["name"].to_lower()])
+		return
+	var path := grid.find_path(p["cell"], grid.gate_park_cell(gate))
 	if path.is_empty():
 		add_log("No taxi route from %s to Gate %d." % [p["callsign"], gate["id"] + 1])
 		return
@@ -306,8 +388,10 @@ func runway_has_waiting_departure(runway_id: int) -> bool:
 
 # Arrivals must not starve departures: a plane already holding short goes first,
 # otherwise a steady arrival stream traps outbound traffic until it gets towed.
-func find_arrival_runway() -> Variant:
+func find_arrival_runway(p: Dictionary) -> Variant:
 	for r in grid.runways:
+		if not runway_fits(r, p):
+			continue
 		if grid.runway_is_clear(r) and not runway_has_waiting_departure(r["id"]):
 			return r
 	return null
@@ -315,7 +399,7 @@ func find_arrival_runway() -> Variant:
 
 func find_departure_runway(p: Dictionary) -> Dictionary:
 	for r in grid.runways:
-		if not grid.runway_is_usable(r):
+		if not grid.runway_is_usable(r) or not runway_fits(r, p):
 			continue
 		var target: Vector2i = grid.runway_hold_short_cell(r)
 		if target == AirportGrid.NOWHERE:
@@ -350,14 +434,24 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			p["heading"] = (orbit - p["pos"]).angle()
 			p["pos"] = p["pos"].move_toward(orbit, FLY_SPEED * dt)
 
-			var runway = find_arrival_runway()
-			if runway != null:
+			var runway = find_arrival_runway(p)
+			# Never clear a landing we can't park — a plane that has already
+			# touched down has nowhere to go, so the stand check belongs here.
+			if runway != null and any_gate_fits(p):
 				runway["occupied"] = true
 				p["runway_id"] = runway["id"]
 				p["state"] = "APPROACH"
 				p["state_timer"] = 0.0
 			elif p["air_hold_timer"] >= p["max_air_hold"]:
-				var reason := "no usable runway" if not grid.has_usable_runway() else "all runways busy"
+				var reason := "all runways busy"
+				if not grid.has_usable_runway():
+					reason = "no usable runway"
+				elif not any_runway_fits(p):
+					reason = "no runway long enough for a %s (needs %d tiles)" % [
+						class_of(p)["name"].to_lower(), class_of(p)["min_runway"],
+					]
+				elif not any_gate_fits(p):
+					reason = "no stand big enough for a %s" % class_of(p)["name"].to_lower()
 				divert(p, reason, 15)
 
 		"APPROACH":
@@ -408,13 +502,17 @@ func update_plane(p: Dictionary, dt: float) -> void:
 		"SEEK_GATE":
 			if try_assign_gate(p):
 				return
-			if grid.usable_free_gates().is_empty():
+			if not any_gate_fits(p):
+				# Only reachable if the last compatible stand was demolished
+				# mid-approach; AIR_HOLD screens this case before clearing.
+				divert(p, "its stand was removed on approach", 10)
+			elif compatible_free_gates(p).is_empty():
 				p["state"] = "HOLDING"
 				p["hold_timer"] = 0.0
 				set_path(p, [])
-				add_log("%s holding — no free gate." % p["callsign"])
+				add_log("%s holding — no free stand." % p["callsign"])
 			else:
-				divert(p, "no taxi route to any gate", 10)
+				divert(p, "no taxi route to any stand", 10)
 
 		"HOLDING":
 			p["hold_timer"] += dt
@@ -547,17 +645,21 @@ func apply_tool_at(cell: Vector2i) -> void:
 			money -= COST_TAXIWAY
 			grid.place_taxiway(cell)
 
-		Tool.GATE:
-			if not grid.can_place_gate(cell):
+		Tool.GATE_SMALL, Tool.GATE_LARGE:
+			var size := tool_gate_size()
+			var cells := grid.gate_cells_for(cell, size)
+			if not grid.can_place_gate(cells):
 				return
-			if money < COST_GATE:
-				add_log("Not enough money for a gate ($%d)." % COST_GATE)
+			var gate_cost: int = COST_GATE_TILE * size
+			if money < gate_cost:
+				add_log("Not enough money for that stand ($%d)." % gate_cost)
 				return
-			money -= COST_GATE
-			var id := grid.place_gate(cell)
+			money -= gate_cost
+			var id := grid.place_gate(cells, size)
+			var kind := "widebody stand" if size >= 2 else "stand"
 			var gate = grid.get_gate(id)
 			if grid.gate_is_connected(gate):
-				add_log("Built Gate %d for $%d." % [id + 1, COST_GATE])
+				add_log("Built Gate %d (%s) for $%d." % [id + 1, kind, gate_cost])
 			else:
 				add_log("Built Gate %d — NOT connected to a taxiway, no flights will use it." % (id + 1))
 
@@ -592,6 +694,10 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 		add_log("Built Runway %d for $%d." % [id + 1, cost])
 
 
+func tool_gate_size() -> int:
+	return 2 if tool == Tool.GATE_LARGE else 1
+
+
 func tile_cost(type: int) -> int:
 	match type:
 		AirportGrid.TileType.TAXIWAY:
@@ -599,7 +705,7 @@ func tile_cost(type: int) -> int:
 		AirportGrid.TileType.RUNWAY:
 			return COST_RUNWAY_TILE
 		AirportGrid.TileType.GATE:
-			return COST_GATE
+			return COST_GATE_TILE
 	return 0
 
 
@@ -708,10 +814,17 @@ func _simulate(dt: float) -> void:
 	planes = planes.filter(func(p): return p["state"] != "REMOVE")
 
 
+func _class_requirements() -> String:
+	var parts := []
+	for c in CLASSES:
+		parts.append("%s %dt" % [c["code"], c["min_runway"]])
+	return "Needs: " + ", ".join(parts)
+
+
 func _update_hud() -> void:
 	money_label.text = "Money: $%d" % money
 	rep_label.text = "Reputation: %d" % reputation
-	var clock := "PAUSED" if paused else "%gx" % speed
+	var clock := "PAUSED" if paused else "%dx" % int(speed)
 	next_in_label.text = "Next flight in: %.1fs   [%s]" % [max(0.0, next_spawn_at - time_elapsed), clock]
 
 	var usable_runways := 0
@@ -719,11 +832,19 @@ func _update_hud() -> void:
 		if grid.runway_is_usable(r):
 			usable_runways += 1
 	var connected_gates := 0
+	var wide_stands := 0
 	for g in grid.gates:
 		if grid.gate_is_connected(g):
 			connected_gates += 1
-	stats_label.text = "Runways: %d (%d usable)\nGates: %d (%d connected)\nAircraft: %d" % [
-		grid.runways.size(), usable_runways, grid.gates.size(), connected_gates, planes.size(),
+			if g["size"] >= 2:
+				wide_stands += 1
+	var longest := 0
+	for r in grid.runways:
+		if grid.runway_is_usable(r):
+			longest = max(longest, r["cells"].size())
+	stats_label.text = "Runways: %d (%d usable, longest %dt → %s)\nStands: %d connected of %d (%d widebody)\nAircraft: %d" % [
+		grid.runways.size(), usable_runways, longest, _runway_capability(longest),
+		connected_gates, grid.gates.size(), wide_stands, planes.size(),
 	]
 
 	match tool:
@@ -734,11 +855,14 @@ func _update_hud() -> void:
 			hint_label.text = "TAXIWAY — click or drag to paint.\nGates and runways need a taxiway connection."
 			tool_info_label.text = "$%d per tile" % COST_TAXIWAY
 		Tool.RUNWAY:
-			hint_label.text = "RUNWAY — drag a straight line.\nMinimum %d tiles to be usable." % AirportGrid.MIN_RUNWAY_LEN
+			hint_label.text = "RUNWAY — drag a straight line.\n%s" % _class_requirements()
 			tool_info_label.text = "$%d per tile" % COST_RUNWAY_TILE
-		Tool.GATE:
-			hint_label.text = "GATE — click a tile next to a taxiway."
-			tool_info_label.text = "$%d each" % COST_GATE
+		Tool.GATE_SMALL:
+			hint_label.text = "STAND (small) — 1 tile, next to a taxiway.\nTakes Light and Narrowbody."
+			tool_info_label.text = "$%d" % COST_GATE_TILE
+		Tool.GATE_LARGE:
+			hint_label.text = "STAND (widebody) — 2 tiles wide.\nTakes any aircraft, including Widebody."
+			tool_info_label.text = "$%d" % (COST_GATE_TILE * 2)
 		Tool.DEMOLISH:
 			hint_label.text = "DEMOLISH — click to remove.\nOccupied gates and runways can't be removed."
 			tool_info_label.text = "Refunds %d%% of build cost" % int(REFUND_RATE * 100)
@@ -789,6 +913,14 @@ func _draw_tile(cell: Vector2i, color: Color) -> void:
 	draw_rect(_cell_rect(cell), color, true)
 
 
+# Largest aircraft class a runway of this length can take, as a letter code.
+func _runway_capability(length: int) -> String:
+	for i in range(CLASSES.size() - 1, -1, -1):
+		if length >= CLASSES[i]["min_runway"]:
+			return CLASSES[i]["code"]
+	return "-"
+
+
 func _draw_runway(r: Dictionary) -> void:
 	var cells: Array = r["cells"]
 	for c in cells:
@@ -805,7 +937,7 @@ func _draw_runway(r: Dictionary) -> void:
 		for c in cells:
 			draw_rect(_cell_rect(c), Color(1.0, 0.35, 0.35, 0.9), false, 1.0)
 
-	var label := "RWY %d" % (r["id"] + 1)
+	var label := "RWY %d · %dt · %s" % [r["id"] + 1, cells.size(), _runway_capability(cells.size())]
 	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
 		label += " (TOO SHORT)"
 	elif not usable:
@@ -814,7 +946,11 @@ func _draw_runway(r: Dictionary) -> void:
 
 
 func _draw_gate(g: Dictionary) -> void:
-	var rect := _cell_rect(g["cell"])
+	var cells: Array = g["cells"]
+	var rect := _cell_rect(cells[0])
+	for c in cells:
+		rect = rect.merge(_cell_rect(c))
+
 	var connected := grid.gate_is_connected(g)
 	var fill := Color(0.75, 0.32, 0.25) if g["occupied"] else Color(0.18, 0.42, 0.18)
 	var outline := Color(1.0, 0.7, 0.63) if g["occupied"] else Color(0.61, 0.91, 0.61)
@@ -824,7 +960,8 @@ func _draw_gate(g: Dictionary) -> void:
 
 	draw_rect(rect, fill, true)
 	draw_rect(rect, outline, false, 2.0)
-	draw_string(ThemeDB.fallback_font, rect.position + Vector2(8, 21), "G%d" % (g["id"] + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.95, 0.95, 0.95))
+	var tag := "G%d%s" % [g["id"] + 1, "·W" if g["size"] >= 2 else ""]
+	draw_string(ThemeDB.fallback_font, rect.position + Vector2(6, 21), tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.95, 0.95, 0.95))
 	if not connected:
 		draw_string(ThemeDB.fallback_font, rect.position + Vector2(-6, -6), "unconnected", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1.0, 0.55, 0.55))
 
@@ -857,15 +994,16 @@ func _draw_plane(p: Dictionary) -> void:
 	var pos: Vector2 = p["pos"]
 	var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
 	var side := Vector2(-fwd.y, fwd.x)
+	var s: float = class_of(p)["scale"]
 
-	draw_line(pos + side * 9.0, pos - side * 9.0, color.darkened(0.25), 3.0)
+	draw_line(pos + side * 9.0 * s, pos - side * 9.0 * s, color.darkened(0.25), 3.0 * s)
 	draw_colored_polygon(PackedVector2Array([
-		pos + fwd * 13.0,
-		pos - fwd * 8.0 + side * 6.0,
-		pos - fwd * 8.0 - side * 6.0,
+		pos + fwd * 13.0 * s,
+		pos - fwd * 8.0 * s + side * 6.0 * s,
+		pos - fwd * 8.0 * s - side * 6.0 * s,
 	]), color)
 
-	var label: String = p["callsign"]
+	var label: String = "%s [%s]" % [p["callsign"], class_of(p)["code"]]
 	match p["state"]:
 		"AIR_HOLD":
 			label += " (circling)"
@@ -890,8 +1028,10 @@ func _draw_ghost() -> void:
 	match tool:
 		Tool.TAXIWAY:
 			ok = grid.can_place_taxiway(hover_cell) and money >= COST_TAXIWAY
-		Tool.GATE:
-			ok = grid.can_place_gate(hover_cell) and money >= COST_GATE
+		Tool.GATE_SMALL, Tool.GATE_LARGE:
+			var size := tool_gate_size()
+			cells = grid.gate_cells_for(hover_cell, size)
+			ok = grid.can_place_gate(cells) and money >= COST_GATE_TILE * size
 		Tool.RUNWAY:
 			if is_dragging and grid.in_bounds(drag_start):
 				cells = grid.line_cells(drag_start, hover_cell)
