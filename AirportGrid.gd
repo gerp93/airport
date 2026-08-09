@@ -103,48 +103,42 @@ func line_cells(from: Vector2i, to: Vector2i) -> Array:
 	return cells
 
 
-# Which existing runway a straight segment would lengthen, or -1 for a new one.
-# Lets the player grow a runway past a class threshold by painting more pavement
-# at either end instead of demolishing and rebuilding the whole thing.
-func runway_extended_by(cells: Array) -> int:
-	if cells.is_empty():
-		return -1
-	var horizontal: bool = cells.size() < 2 or cells[0].y == cells[1].y
-	var sorted: Array = cells.duplicate()
-	sorted.sort_custom(func(a, b): return (a.x < b.x) if horizontal else (a.y < b.y))
-	var n_lo: int = sorted[0].x if horizontal else sorted[0].y
-	var n_hi: int = sorted[sorted.size() - 1].x if horizontal else sorted[sorted.size() - 1].y
-	var cross: int = sorted[0].y if horizontal else sorted[0].x
+# A runway is a free-angle segment in world space rather than a row of tiles.
+# It is the one structure the grid buys nothing for: taxiways need a grid because
+# they are a pathfinding graph and stands need one because they are discrete
+# slots, but a runway is a single straight strip. Tile-stepping it restricted
+# headings to the eight compass points; endpoints let the player build any
+# alignment, so all 36 designators are reachable and lengths are exact.
+#
+# The footprint cells are still tracked, purely so nothing else can be built on
+# the pavement and so demolition knows what to clear.
 
-	for r in runways:
-		if bool(r["horizontal"]) != horizontal:
-			continue
-		var rc: Array = r["cells"]
-		var r_cross: int = rc[0].y if horizontal else rc[0].x
-		if r_cross != cross:
-			continue
-		var r_lo: int = rc[0].x if horizontal else rc[0].y
-		var r_hi: int = rc[rc.size() - 1].x if horizontal else rc[rc.size() - 1].y
-		if n_hi + 1 == r_lo or n_lo - 1 == r_hi:
-			return int(r["id"])
-	return -1
-
-
-func extend_runway(id: int, cells: Array) -> void:
-	var r = get_runway(id)
-	if r == null:
-		return
-	for c in cells:
-		tiles[c] = {"type": TileType.RUNWAY, "entity_id": id}
-	var horizontal: bool = bool(r["horizontal"])
-	var all: Array = r["cells"] + cells
-	all.sort_custom(func(a, b): return (a.x < b.x) if horizontal else (a.y < b.y))
-	r["cells"] = all
-	for c in cells:
-		_refresh_cell(c)
+func runway_footprint(a: Vector2, b: Vector2) -> Array:
+	var out := []
+	var lo := Vector2(minf(a.x, b.x), minf(a.y, b.y)) - Vector2(TILE, TILE)
+	var hi := Vector2(maxf(a.x, b.x), maxf(a.y, b.y)) + Vector2(TILE, TILE)
+	var c0 := world_to_cell(lo)
+	var c1 := world_to_cell(hi)
+	for y in range(c0.y, c1.y + 1):
+		for x in range(c0.x, c1.x + 1):
+			var c := Vector2i(x, y)
+			if not in_bounds(c):
+				continue
+			var centre := cell_to_world(c)
+			var near := Geometry2D.get_closest_point_to_segment(centre, a, b)
+			if centre.distance_to(near) <= TILE * 0.62:
+				out.append(c)
+	return out
 
 
-func can_place_runway(cells: Array) -> bool:
+# Measured end to end, plus one tile so a strip drawn between two cell centres
+# covers the same distance the old tile count reported.
+func runway_length_tiles(r: Dictionary) -> float:
+	return (r["a"] as Vector2).distance_to(r["b"] as Vector2) / TILE + 1.0
+
+
+func can_place_runway_seg(a: Vector2, b: Vector2) -> bool:
+	var cells := runway_footprint(a, b)
 	if cells.is_empty():
 		return false
 	for c in cells:
@@ -153,21 +147,67 @@ func can_place_runway(cells: Array) -> bool:
 	return true
 
 
-func place_runway(cells: Array) -> int:
-	var sorted: Array = cells.duplicate()
-	var horizontal: bool = sorted.size() < 2 or sorted[0].y == sorted[1].y
-	# Normalize so cells[0] is always the threshold (left for horizontal, top for vertical).
-	sorted.sort_custom(func(a, b): return (a.x < b.x) if horizontal else (a.y < b.y))
-
+func place_runway_seg(a: Vector2, b: Vector2) -> int:
 	var id := _runway_seq
 	_runway_seq += 1
-	runways.append({
-		"id": id, "cells": sorted, "horizontal": horizontal, "occupied": false,
-	})
-	for c in sorted:
+	var cells := runway_footprint(a, b)
+	runways.append({"id": id, "a": a, "b": b, "cells": cells, "occupied": false})
+	for c in cells:
 		tiles[c] = {"type": TileType.RUNWAY, "entity_id": id}
 		_refresh_cell(c)
 	return id
+
+
+# A drag that begins on one end of an existing runway and continues roughly along
+# its axis lengthens that runway instead of laying a parallel strip beside it.
+const EXTEND_SNAP := 44.0
+const EXTEND_ARC := 0.30
+
+
+func runway_extend_target(from: Vector2, to: Vector2) -> int:
+	if from.distance_to(to) < 1.0:
+		return -1
+	var outward := (to - from).normalized()
+	for r in runways:
+		var axis := runway_direction(r)
+		if from.distance_to(r["a"]) <= EXTEND_SNAP and absf(outward.angle_to(-axis)) < EXTEND_ARC:
+			return int(r["id"])
+		if from.distance_to(r["b"]) <= EXTEND_SNAP and absf(outward.angle_to(axis)) < EXTEND_ARC:
+			return int(r["id"])
+	return -1
+
+
+func extend_runway_seg(id: int, to: Vector2) -> void:
+	var r = get_runway(id)
+	if r == null:
+		return
+	var a: Vector2 = r["a"]
+	var b: Vector2 = r["b"]
+	var axis := runway_direction(r)
+	var span := a.distance_to(b)
+	# Project onto the existing axis so extending can never bend the runway, and
+	# clamp so a stray drag shortens nothing.
+	var t: float = (to - a).dot(axis)
+	if to.distance_to(a) < to.distance_to(b):
+		r["a"] = a + axis * minf(t, 0.0)
+	else:
+		r["b"] = a + axis * maxf(t, span)
+	_restamp_runway(r)
+
+
+func _restamp_runway(r: Dictionary) -> void:
+	var old: Array = r["cells"]
+	for c in old:
+		if tiles.has(c) and tiles[c]["entity_id"] == r["id"] and tile_type(c) == TileType.RUNWAY:
+			tiles.erase(c)
+	var cells := runway_footprint(r["a"], r["b"])
+	r["cells"] = cells
+	for c in cells:
+		tiles[c] = {"type": TileType.RUNWAY, "entity_id": r["id"]}
+	for c in old:
+		_refresh_cell(c)
+	for c in cells:
+		_refresh_cell(c)
 
 
 # A gate spans `size` tiles to the right of its anchor: 1 for a small stand,
@@ -240,15 +280,16 @@ func gate_park_cell(g: Dictionary) -> Vector2i:
 
 
 func runway_is_usable(r: Dictionary) -> bool:
-	return r["cells"].size() >= MIN_RUNWAY_LEN and runway_exit_cell(r) != NOWHERE
+	return runway_length_tiles(r) >= float(MIN_RUNWAY_LEN) and runway_exit_taxiway(r) != NOWHERE
 
 
-func runway_threshold(r: Dictionary) -> Vector2i:
-	return r["cells"][0]
+func runway_threshold_point(r: Dictionary) -> Vector2:
+	return r["a"]
 
 
 func runway_direction(r: Dictionary) -> Vector2:
-	return Vector2.RIGHT if r["horizontal"] else Vector2.DOWN
+	var d: Vector2 = (r["b"] as Vector2) - (r["a"] as Vector2)
+	return Vector2.RIGHT if d.length() < 0.001 else d.normalized()
 
 
 # Runway designators follow the real convention: the approach heading in tens of
@@ -268,8 +309,8 @@ func runway_headings(r: Dictionary) -> Array:
 	return [mini(num, recip), maxi(num, recip)]
 
 
-# Parallel runways sharing a heading take L/C/R, and the suffix mirrors at the
-# far end the way it does in reality: 09L is 27R from the other direction.
+# Parallel runways sharing a heading take L/C/R, ordered across the field, and the
+# suffix mirrors at the far end the way it does in reality: 09L reads as 27R.
 func runway_name(r: Dictionary) -> String:
 	var pair := runway_headings(r)
 	var siblings := []
@@ -280,10 +321,9 @@ func runway_name(r: Dictionary) -> String:
 	if siblings.size() <= 1:
 		return "%02d/%02d" % pair
 
-	var horizontal: bool = bool(r["horizontal"])
-	siblings.sort_custom(func(a, b):
-		return (a["cells"][0].y < b["cells"][0].y) if horizontal \
-			else (a["cells"][0].x < b["cells"][0].x))
+	var axis := runway_direction(r)
+	var perp := Vector2(-axis.y, axis.x)
+	siblings.sort_custom(func(x, y): return perp.dot(x["a"]) < perp.dot(y["a"]))
 
 	var idx := 0
 	for i in siblings.size():
@@ -300,34 +340,49 @@ func runway_name(r: Dictionary) -> String:
 	return "%02d%s/%02d%s" % [pair[0], suffix, pair[1], mirrored]
 
 
-# Where an outbound plane waits without standing on the runway itself.
+# Taxiway touching the pavement nearest the threshold: where an outbound aircraft
+# waits without standing on the runway itself.
 func runway_hold_short_cell(r: Dictionary) -> Vector2i:
-	for n in neighbors(runway_threshold(r)):
-		if tile_type(n) == TileType.TAXIWAY:
-			return n
-	return NOWHERE
+	return _connected_taxiway(r, true)
 
 
-func runway_is_clear(r: Dictionary, ignore_plane: int = -1) -> bool:
-	if r["occupied"] or not runway_is_usable(r):
-		return false
-	for c in r["cells"]:
-		var owner := claim_owner(c)
-		if owner != -1 and owner != ignore_plane:
-			return false
-	return true
+# Taxiway furthest along the landing roll, so a connection near the far end
+# produces a realistically long rollout.
+func runway_exit_taxiway(r: Dictionary) -> Vector2i:
+	return _connected_taxiway(r, false)
 
 
-# The runway cell with an adjacent taxiway that sits furthest along the rollout,
-# so a connection near the far end produces a realistically long landing roll.
-func runway_exit_cell(r: Dictionary) -> Vector2i:
-	var found := NOWHERE
+func _connected_taxiway(r: Dictionary, nearest: bool) -> Vector2i:
+	var axis := runway_direction(r)
+	var a: Vector2 = r["a"]
+	var best := NOWHERE
+	var best_t := INF if nearest else -INF
 	for c in r["cells"]:
 		for n in neighbors(c):
-			if tile_type(n) == TileType.TAXIWAY:
-				found = c
-				break
-	return found
+			if tile_type(n) != TileType.TAXIWAY:
+				continue
+			var t: float = (cell_to_world(n) - a).dot(axis)
+			if (t < best_t) if nearest else (t > best_t):
+				best_t = t
+				best = n
+	return best
+
+
+# Where the landing roll ends: the exit taxiway projected onto the centreline.
+func runway_exit_point(r: Dictionary) -> Vector2:
+	var n := runway_exit_taxiway(r)
+	var a: Vector2 = r["a"]
+	if n == NOWHERE:
+		return r["b"]
+	var axis := runway_direction(r)
+	var t: float = clampf((cell_to_world(n) - a).dot(axis), 0.0, a.distance_to(r["b"]))
+	return a + axis * t
+
+
+# Aircraft no longer claim individual runway tiles - the strip is held as a whole
+# by whoever is using it, which is both simpler and how a real runway works.
+func runway_is_clear(r: Dictionary, _ignore_plane: int = -1) -> bool:
+	return not r["occupied"] and runway_is_usable(r)
 
 
 func usable_free_gates() -> Array:
@@ -505,7 +560,7 @@ func from_dict(d: Dictionary) -> void:
 # --- starting layout ---
 
 func seed_starter_airport() -> void:
-	place_runway(line_cells(Vector2i(4, 12), Vector2i(19, 12)))
+	place_runway_seg(cell_to_world(Vector2i(4, 12)), cell_to_world(Vector2i(19, 12)))
 	# A parallel taxiway plus an apron loop, so a blocked plane has a detour to
 	# find. A single-width spine deadlocks head-on traffic almost immediately.
 	for x in range(4, 22):

@@ -122,7 +122,7 @@ const REP_PER_TURNAROUND := 2
 const REP_MAX := 100
 
 const SAVE_PATH := "user://airport_save.dat"
-const SAVE_VERSION := 2
+const SAVE_VERSION := 3
 
 const AIRPORT_CODE := "HOME"
 const MAX_ROUTES := 8
@@ -502,8 +502,8 @@ func effective_air_capacity() -> int:
 	return maxi(1, int(round(capacity("tower") * wx("arrivals", 1.0))))
 
 
-func required_runway(p: Dictionary) -> int:
-	return int(ceil(class_of(p)["min_runway"] * wx("length", 1.0)))
+func required_runway(p: Dictionary) -> float:
+	return float(class_of(p)["min_runway"]) * wx("length", 1.0)
 
 
 func taxi_speed() -> float:
@@ -556,7 +556,7 @@ func can_handle_class(size: int) -> bool:
 	var need: Dictionary = CLASSES[size]
 	var runway_ok := false
 	for r in grid.runways:
-		if grid.runway_is_usable(r) and r["cells"].size() >= int(need["min_runway"]):
+		if grid.runway_is_usable(r) and grid.runway_length_tiles(r) >= float(need["min_runway"]):
 			runway_ok = true
 			break
 	if not runway_ok:
@@ -990,7 +990,7 @@ func class_of(p: Dictionary) -> Dictionary:
 
 
 func runway_fits(r: Dictionary, p: Dictionary) -> bool:
-	return r["cells"].size() >= required_runway(p)
+	return grid.runway_length_tiles(r) >= required_runway(p)
 
 
 func gate_fits(g: Dictionary, p: Dictionary) -> bool:
@@ -1086,16 +1086,19 @@ func find_departure_runway(p: Dictionary) -> Dictionary:
 	for r in grid.runways:
 		if not grid.runway_is_usable(r) or not runway_fits(r, p):
 			continue
+		# A usable runway always has a connected taxiway, so there is always
+		# somewhere to hold short.
 		var target: Vector2i = grid.runway_hold_short_cell(r)
 		if target == AirportGrid.NOWHERE:
-			# Nothing beside the threshold to wait on, so the plane has to
-			# occupy the runway itself — only worth starting if it's clear.
-			if not grid.runway_is_clear(r):
-				continue
-			target = grid.runway_threshold(r)
+			continue
 		var path := grid.find_path(p["cell"], target)
 		if not path.is_empty():
-			return {"runway": r, "path": path}
+			# Runways work in both directions — that is what the two designators
+			# mean — so depart from whichever end the aircraft is already near
+			# rather than back-taxiing the full length with the runway closed.
+			var hold := grid.cell_to_world(target)
+			var from_b: bool = hold.distance_to(r["b"]) < hold.distance_to(r["a"])
+			return {"runway": r, "path": path, "from_b": from_b}
 	return {}
 
 
@@ -1147,7 +1150,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				return
 			# Line up behind the threshold so the plane arrives along the runway
 			# axis instead of turning 90 degrees on touchdown.
-			var lineup: Vector2 = grid.cell_to_world(grid.runway_threshold(runway)) \
+			var lineup: Vector2 = grid.runway_threshold_point(runway) \
 				- grid.runway_direction(runway) * 220.0
 			if move_toward_point(p, lineup, FLY_SPEED, dt):
 				p["state"] = "INBOUND"
@@ -1158,32 +1161,33 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			if runway == null:
 				divert(p, "runway removed on approach", 15)
 				return
-			var threshold: Vector2i = grid.runway_threshold(runway)
-			if move_toward_point(p, grid.cell_to_world(threshold), FLY_SPEED, dt):
-				grid.try_claim(threshold, p["id"])
-				p["cell"] = threshold
-				var exit_cell: Vector2i = grid.runway_exit_cell(runway)
-				var cells: Array = runway["cells"]
-				set_path(p, cells.slice(0, cells.find(exit_cell) + 1))
+			if move_toward_point(p, grid.runway_threshold_point(runway), FLY_SPEED, dt):
 				p["state"] = "LANDING"
 				p["state_timer"] = 0.0
 				add_log("%s touching down on Runway %s." % [p["callsign"], grid.runway_name(runway)])
 
 		"LANDING":
-			match advance_along_path(p, ROLLOUT_SPEED, dt):
-				"arrived":
-					var runway = grid.get_runway(p["runway_id"])
-					if runway != null:
-						runway["occupied"] = false
+			var runway = grid.get_runway(p["runway_id"])
+			if runway == null:
+				divert(p, "runway removed while landing", 15)
+				return
+			# Roll along the centreline, then hand back to the taxi grid at the exit.
+			if move_toward_point(p, grid.runway_exit_point(runway), ROLLOUT_SPEED, dt):
+				var exit_cell: Vector2i = grid.runway_exit_taxiway(runway)
+				if exit_cell == AirportGrid.NOWHERE:
+					divert(p, "runway lost its taxiway connection", 15)
+					return
+				if grid.try_claim(exit_cell, p["id"]):
+					p["cell"] = exit_cell
+					runway["occupied"] = false
 					p["runway_id"] = -1
+					p["blocked_timer"] = 0.0
 					p["state"] = "SEEK_GATE"
 					p["state_timer"] = 0.0
-				"blocked":
+				else:
 					p["blocked_timer"] += dt
 					if p["blocked_timer"] >= MAX_BLOCK_TIME:
 						divert(p, "runway exit blocked", 15)
-				"lost":
-					divert(p, "runway removed while landing", 15)
 
 		"SEEK_GATE":
 			if try_assign_gate(p):
@@ -1272,6 +1276,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			if departure.is_empty():
 				return
 			p["runway_id"] = departure["runway"]["id"]
+			p["dep_from_b"] = departure["from_b"]
 			set_path(p, departure["path"])
 			# Gate frees at pushback, not at the runway — keeps throughput sane.
 			var gate = grid.get_gate(p["gate_id"])
@@ -1308,29 +1313,37 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			# Claim the runway only now, so a long taxi-out doesn't block landings.
 			if grid.runway_is_clear(runway, p["id"]):
 				runway["occupied"] = true
-				set_path(p, runway["cells"])
-				p["state"] = "DEPARTING"
+				# Free the taxiway tile: from here the strip is held as a whole.
+				grid.release_all(p["id"])
+				p["cell"] = AirportGrid.NOWHERE
+				set_path(p, [])
+				p["state"] = "LINE_UP"
 				p["state_timer"] = 0.0
 			elif p["state_timer"] >= MAX_BLOCK_TIME:
 				tow(p, "never got a takeoff slot")
 
+		# Taxi onto the threshold and align before rolling.
+		"LINE_UP":
+			var runway = grid.get_runway(p["runway_id"])
+			if runway == null:
+				tow(p, "runway removed before takeoff")
+				return
+			var start_end: Vector2 = runway["b"] if p.get("dep_from_b", false) else runway["a"]
+			if move_toward_point(p, start_end, taxi_speed(), dt):
+				p["state"] = "DEPARTING"
+				p["state_timer"] = 0.0
+
 		"DEPARTING":
-			match advance_along_path(p, TAKEOFF_SPEED, dt):
-				"arrived":
-					grid.release_all(p["id"])
-					var runway = grid.get_runway(p["runway_id"])
-					if runway != null:
-						runway["occupied"] = false
-					p["runway_id"] = -1
-					p["cell"] = AirportGrid.NOWHERE
-					p["state"] = "CLIMB_OUT"
-					p["state_timer"] = 0.0
-				"blocked":
-					p["blocked_timer"] += dt
-					if p["blocked_timer"] >= MAX_BLOCK_TIME:
-						tow(p, "takeoff roll blocked")
-				"lost":
-					tow(p, "runway removed during takeoff")
+			var runway = grid.get_runway(p["runway_id"])
+			if runway == null:
+				tow(p, "runway removed during takeoff")
+				return
+			var roll_to: Vector2 = runway["a"] if p.get("dep_from_b", false) else runway["b"]
+			if move_toward_point(p, roll_to, TAKEOFF_SPEED, dt):
+				runway["occupied"] = false
+				p["runway_id"] = -1
+				p["state"] = "CLIMB_OUT"
+				p["state_timer"] = 0.0
 
 		"CLIMB_OUT":
 			var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
@@ -1386,37 +1399,60 @@ func apply_tool_at(cell: Vector2i) -> void:
 
 
 func commit_runway(from: Vector2i, to: Vector2i) -> void:
-	var cells := grid.line_cells(from, to)
-	if not grid.can_place_runway(cells):
+	# Endpoints are cell centres, but the strip between them is free-angle, so any
+	# heading the grid can express is buildable.
+	var pa := grid.cell_to_world(from)
+	var pb := grid.cell_to_world(to)
+
+	# A drag starting on an existing runway end lengthens it instead of laying a
+	# parallel strip alongside.
+	var extend_id := grid.runway_extend_target(pa, pb)
+	if extend_id >= 0:
+		var existing = grid.get_runway(extend_id)
+		var before: float = grid.runway_length_tiles(existing)
+		var added: float = maxf(0.0, pa.distance_to(pb) / AirportGrid.TILE)
+		var ext_cost := int(round(COST_RUNWAY_TILE * added))
+		if money < ext_cost:
+			add_log("Not enough cash — that extension costs %s." % money_str(ext_cost))
+			return
+		grid.extend_runway_seg(extend_id, pb)
+		if is_equal_approx(grid.runway_length_tiles(existing), before):
+			add_log("That drag wouldn't lengthen Runway %s." % grid.runway_name(existing))
+			return
+		money -= ext_cost
+		add_log("Extended Runway %s to %s for %s — now takes %s." % [
+			grid.runway_name(existing), length_str(grid.runway_length_tiles(existing)),
+			money_str(ext_cost), _runway_capability(grid.runway_length_tiles(existing)),
+		])
+		return
+
+	if not grid.can_place_runway_seg(pa, pb):
 		add_log("Runway must be placed on clear ground.")
 		return
-	var cost: int = COST_RUNWAY_TILE * cells.size()
+	var tiles_used: float = pa.distance_to(pb) / AirportGrid.TILE + 1.0
+	var cost := int(round(COST_RUNWAY_TILE * tiles_used))
 	if money < cost:
 		add_log("Not enough cash — that runway costs %s." % money_str(cost))
 		return
-	# Painting pavement onto the end of an existing runway lengthens it, so a
-	# runway can grow past a class threshold without being rebuilt.
-	var extend_id := grid.runway_extended_by(cells)
-	if extend_id >= 0:
-		money -= cost
-		grid.extend_runway(extend_id, cells)
-		var grown = grid.get_runway(extend_id)
-		add_log("Extended Runway %s to %s for %s — now takes %s." % [
-			grid.runway_name(grown), length_str(grown["cells"].size()), money_str(cost),
-			_runway_capability(grown["cells"].size()),
-		])
-		return
+
 	money -= cost
-	var id := grid.place_runway(cells)
+	var id := grid.place_runway_seg(pa, pb)
 	var runway = grid.get_runway(id)
-	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
-		add_log("Built Runway %s for %s — TOO SHORT (needs %s)." % [grid.runway_name(runway), money_str(cost), length_str(AirportGrid.MIN_RUNWAY_LEN)])
+	var length: float = grid.runway_length_tiles(runway)
+	if length < float(AirportGrid.MIN_RUNWAY_LEN):
+		add_log("Built Runway %s for %s — TOO SHORT (needs %s)." % [
+			grid.runway_name(runway), money_str(cost),
+			length_str(float(AirportGrid.MIN_RUNWAY_LEN)),
+		])
 	elif not grid.runway_is_usable(runway):
-		add_log("Built Runway %s for %s — no taxiway connection yet." % [grid.runway_name(runway), money_str(cost)])
+		add_log("Built Runway %s for %s — no taxiway connection yet." % [
+			grid.runway_name(runway), money_str(cost),
+		])
 	else:
-		add_log("Built Runway %s for %s." % [grid.runway_name(runway), money_str(cost)])
-
-
+		add_log("Built Runway %s (%s) for %s — takes %s." % [
+			grid.runway_name(runway), length_str(length), money_str(cost),
+			_runway_capability(length),
+		])
 func tool_gate_size() -> int:
 	return 2 if tool == Tool.GATE_LARGE else 1
 
@@ -1741,8 +1777,8 @@ func money_str(v: int) -> String:
 	return "%s$%s" % [sign_txt, _grouped(a)]
 
 
-func length_str(tiles: int) -> String:
-	return "%s %s" % [_grouped(tiles * FEET_PER_TILE), LENGTH_UNIT]
+func length_str(tiles: float) -> String:
+	return "%s %s" % [_grouped(int(round(tiles * FEET_PER_TILE))), LENGTH_UNIT]
 
 
 func _class_requirements() -> String:
@@ -1870,10 +1906,10 @@ func _update_hud() -> void:
 			connected_gates += 1
 			if g["size"] >= 2:
 				wide_stands += 1
-	var longest := 0
+	var longest := 0.0
 	for r in grid.runways:
 		if grid.runway_is_usable(r):
-			longest = max(longest, r["cells"].size())
+			longest = maxf(longest, grid.runway_length_tiles(r))
 	stats_label.text = "Runways: %d (%d usable, longest %s → %s)\nStands: %d connected of %d (%d widebody)\nAircraft: %d\nServed: %d   Lost: %d" % [
 		grid.runways.size(), usable_runways, length_str(longest), _runway_capability(longest),
 		connected_gates, grid.gates.size(), wide_stands, planes.size(),
@@ -1888,25 +1924,28 @@ func _update_hud() -> void:
 			hint_label.text = "TAXIWAY — click or drag to paint.\nGates and runways need a taxiway connection."
 			tool_info_label.text = "%s per tile" % money_str(COST_TAXIWAY)
 		Tool.RUNWAY:
-			hint_label.text = "RUNWAY — drag a straight line. 1 tile = %d %s\n%s" % [
+			hint_label.text = "RUNWAY — drag any angle. 1 tile = %d %s\n%s" % [
 				FEET_PER_TILE, LENGTH_UNIT, _class_requirements(),
 			]
 			# Live length while dragging — you need to know when you cross a
 			# class threshold, not after you've paid for the runway.
 			if is_dragging and grid.in_bounds(drag_start) and grid.in_bounds(hover_cell):
-				var painted: Array = grid.line_cells(drag_start, hover_cell)
-				var n: int = painted.size()
-				var cost: int = COST_RUNWAY_TILE * n
-				# Show the combined length when this would extend a runway, otherwise
-				# the readout claims a threshold miss the finished runway won't have.
-				var ext := grid.runway_extended_by(painted)
-				var total := n
+				var pa := grid.cell_to_world(drag_start)
+				var pb := grid.cell_to_world(hover_cell)
+				var span: float = pa.distance_to(pb) / AirportGrid.TILE
+				# Report the finished length: an extension inherits what is already
+				# there, so quoting only the new pavement would understate the class.
+				var ext := grid.runway_extend_target(pa, pb)
+				var total := span + 1.0
+				var cost := int(round(COST_RUNWAY_TILE * total))
 				if ext >= 0:
-					total += grid.get_runway(ext)["cells"].size()
+					total = grid.runway_length_tiles(grid.get_runway(ext)) + span
+					cost = int(round(COST_RUNWAY_TILE * span))
 				var cap := _runway_capability(total)
 				var takes := "too short" if cap == "-" else "takes " + cap
 				var prefix := "extend to " if ext >= 0 else ""
-				tool_info_label.text = "%s%s · %s · %s" % [prefix, length_str(total), takes, money_str(cost)]
+				var heading := "%03d°" % int(round(rad_to_deg(atan2((pb - pa).x, -(pb - pa).y) + TAU)) % 360)
+				tool_info_label.text = "%s%s · %s · %s · %s" % [prefix, length_str(total), heading, takes, money_str(cost)]
 			else:
 				tool_info_label.text = "%s per tile" % money_str(COST_RUNWAY_TILE)
 		Tool.GATE_SMALL:
@@ -1966,37 +2005,68 @@ func _draw_tile(cell: Vector2i, color: Color) -> void:
 
 
 # Largest aircraft class a runway of this length can take, as a letter code.
-func _runway_capability(length: int) -> String:
+func _runway_capability(length: float) -> String:
 	for i in range(CLASSES.size() - 1, -1, -1):
 		if length >= CLASSES[i]["min_runway"]:
 			return CLASSES[i]["code"]
 	return "-"
 
 
-func _draw_runway(r: Dictionary) -> void:
-	var cells: Array = r["cells"]
-	for c in cells:
-		_draw_tile(c, Color(0.28, 0.28, 0.30))
+# The runway ghost is a rotated strip rather than highlighted cells, so what the
+# player sees while dragging matches the shape they will actually get.
+func _draw_runway_ghost() -> void:
+	if not is_dragging or not grid.in_bounds(drag_start):
+		return
+	var pa := grid.cell_to_world(drag_start)
+	var pb := grid.cell_to_world(hover_cell)
+	var axis := pb - pa
+	if axis.length() < 0.001:
+		axis = Vector2.RIGHT
+	axis = axis.normalized()
+	var perp := Vector2(-axis.y, axis.x) * (AirportGrid.TILE * 0.42)
+	var ea := pa - axis * (AirportGrid.TILE * 0.5)
+	var eb := pb + axis * (AirportGrid.TILE * 0.5)
 
-	var first: Vector2 = grid.cell_to_world(cells[0])
-	var last: Vector2 = grid.cell_to_world(cells[cells.size() - 1])
-	draw_dashed_line(first, last, Color(0.87, 0.87, 0.87, 0.8), 2.0, 12.0)
+	var ext := grid.runway_extend_target(pa, pb)
+	var span: float = pa.distance_to(pb) / AirportGrid.TILE
+	var cost := int(round(COST_RUNWAY_TILE * (span if ext >= 0 else span + 1.0)))
+	var ok := money >= cost and (ext >= 0 or grid.can_place_runway_seg(pa, pb))
+	var tint := Color(0.45, 0.95, 0.5, 0.4) if ok else Color(0.95, 0.35, 0.35, 0.4)
+
+	draw_colored_polygon(PackedVector2Array([ea + perp, eb + perp, eb - perp, ea - perp]), tint)
+	draw_polyline(PackedVector2Array([
+		ea + perp, eb + perp, eb - perp, ea - perp, ea + perp,
+	]), Color(tint.r, tint.g, tint.b, 0.95), 2.0)
+
+
+func _draw_runway(r: Dictionary) -> void:
+	var a: Vector2 = r["a"]
+	var b: Vector2 = r["b"]
+	var axis := grid.runway_direction(r)
+	var perp := Vector2(-axis.y, axis.x) * (AirportGrid.TILE * 0.42)
+	# Overrun the ends by half a tile so the pavement covers the threshold cells.
+	var ea := a - axis * (AirportGrid.TILE * 0.5)
+	var eb := b + axis * (AirportGrid.TILE * 0.5)
 
 	var usable := grid.runway_is_usable(r)
+	var length: float = grid.runway_length_tiles(r)
+	var quad := PackedVector2Array([ea + perp, eb + perp, eb - perp, ea - perp])
+	draw_colored_polygon(quad, Color(0.28, 0.28, 0.30))
+	draw_dashed_line(a, b, Color(0.87, 0.87, 0.87, 0.8), 2.0, 12.0)
+
 	var label_color := Color(0.95, 0.55, 0.42) if r["occupied"] else Color(0.81, 0.91, 0.81)
 	if not usable:
 		label_color = Color(1.0, 0.45, 0.45)
-		for c in cells:
-			draw_rect(_cell_rect(c), Color(1.0, 0.35, 0.35, 0.9), false, 1.0)
+		draw_polyline(PackedVector2Array([
+			ea + perp, eb + perp, eb - perp, ea - perp, ea + perp,
+		]), Color(1.0, 0.35, 0.35, 0.9), 1.5)
 
-	var label := "RWY %s · %s · %s" % [grid.runway_name(r), length_str(cells.size()), _runway_capability(cells.size())]
-	if cells.size() < AirportGrid.MIN_RUNWAY_LEN:
+	var label := "RWY %s · %s · %s" % [grid.runway_name(r), length_str(length), _runway_capability(length)]
+	if length < float(AirportGrid.MIN_RUNWAY_LEN):
 		label += " (TOO SHORT)"
 	elif not usable:
 		label += " (NO TAXIWAY)"
-	draw_string(ThemeDB.fallback_font, first + Vector2(-14, -18), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_color)
-
-
+	draw_string(ThemeDB.fallback_font, a + Vector2(-14, -18), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_color)
 func _draw_gate(g: Dictionary) -> void:
 	var cells: Array = g["cells"]
 	var rect := _cell_rect(cells[0])
@@ -2093,9 +2163,9 @@ func _draw_ghost() -> void:
 			cells = grid.gate_cells_for(hover_cell, size)
 			ok = grid.can_place_gate(cells) and money >= COST_GATE_TILE * size
 		Tool.RUNWAY:
-			if is_dragging and grid.in_bounds(drag_start):
-				cells = grid.line_cells(drag_start, hover_cell)
-			ok = grid.can_place_runway(cells) and money >= COST_RUNWAY_TILE * cells.size()
+			# Drawn separately as a rotated strip, not as grid cells.
+			_draw_runway_ghost()
+			return
 		Tool.DEMOLISH:
 			var preview := grid.demolish_preview(hover_cell)
 			ok = not preview.is_empty()
