@@ -3,6 +3,7 @@ extends Node2D
 const AirportGrid = preload("res://AirportGrid.gd")
 const Regions = preload("res://Regions.gd")
 const KvgUpdate = preload("res://addons/kvg_update/kvg_update.gd")
+const Render3D = preload("res://Render3D.gd")
 
 const UPDATE_REPO := "gerp93/airport"
 
@@ -168,6 +169,7 @@ const SPAWN_POS := Vector2(-60.0, 150.0)
 const AIR_ANCHOR := Vector2(110.0, 160.0)
 
 var grid: AirportGrid
+var render3d: Render3D
 # Enough for two or three meaningful opening moves rather than exactly one.
 var money := 28_000_000
 var day := 1
@@ -234,6 +236,14 @@ func _ready() -> void:
 	_auto_sign = "--auto-sign" in args
 	grid = AirportGrid.new()
 	grid.seed_starter_airport()
+
+	# The world is drawn in 3D by a Node3D child. A Node3D under a Node2D still
+	# renders — 3D goes through the viewport's World3D, independent of the 2D
+	# canvas — which lets `_draw()` below stay available for screen-space labels
+	# and leaves the whole $UI CanvasLayer untouched.
+	render3d = Render3D.new()
+	add_child(render3d)
+	render3d.attach(grid)
 
 	$UI/SelectBtn.pressed.connect(_set_tool.bind(Tool.SELECT))
 	$UI/TaxiwayBtn.pressed.connect(_set_tool.bind(Tool.TAXIWAY))
@@ -1511,6 +1521,10 @@ func apply_tool_at(cell: Vector2i) -> void:
 			money += refund
 			add_log("Demolished %d tile(s), recovered %s." % [preview["tiles"], money_str(refund)])
 
+	# Every branch above either returned on failure or changed the layout, so the
+	# 3D world is only rebuilt when something actually moved.
+	render3d.mark_layout_dirty()
+
 
 func commit_runway(from: Vector2i, to: Vector2i) -> void:
 	# Endpoints are cell centres, but the strip between them is free-angle, so any
@@ -1530,6 +1544,9 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 			add_log("Not enough cash — that extension costs %s." % money_str(ext_cost))
 			return
 		grid.extend_runway_seg(extend_id, pb)
+		# Marked before the no-op check below: the segment was already restamped,
+		# so the 3D geometry is stale either way.
+		render3d.mark_layout_dirty()
 		if is_equal_approx(grid.runway_length_tiles(existing), before):
 			add_log("That drag wouldn't lengthen Runway %s." % grid.runway_name(existing))
 			return
@@ -1567,6 +1584,7 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 			grid.runway_name(runway), length_str(length), money_str(cost),
 			_runway_capability(length),
 		])
+	render3d.mark_layout_dirty()
 func tool_gate_size() -> int:
 	return 2 if tool == Tool.GATE_LARGE else 1
 
@@ -1631,8 +1649,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			_choose_tool(TOOL_KEYS[event.keycode])
 		return
 
+	# Under the old top-down view the mouse position WAS the world position. In 3D
+	# it is a ray, so every screen coordinate has to be intersected with the
+	# ground plane first — see Render3D.screen_to_world().
 	if event is InputEventMouseMotion:
-		hover_cell = grid.world_to_cell(event.position)
+		hover_cell = grid.world_to_cell(render3d.screen_to_world(event.position))
 		if is_dragging and tool == Tool.TAXIWAY:
 			apply_tool_at(hover_cell)
 		return
@@ -1640,11 +1661,12 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventMouseButton) or event.button_index != MOUSE_BUTTON_LEFT:
 		return
 
-	var cell := grid.world_to_cell(event.position)
+	var world := render3d.screen_to_world(event.position)
+	var cell := grid.world_to_cell(world)
 
 	if event.pressed:
 		if tool == Tool.SELECT:
-			_handle_select_click(event.position, cell)
+			_handle_select_click(world, cell)
 			return
 		is_dragging = true
 		drag_start = cell
@@ -1697,6 +1719,7 @@ func _process(delta: float) -> void:
 	_update_hud()
 	_update_ops_ui()
 	_update_route_ui()
+	_sync_world()
 	queue_redraw()
 
 
@@ -1831,6 +1854,7 @@ func load_game() -> void:
 	planes.clear()
 	selected_plane_id = -1
 	grid.from_dict(d["grid"])
+	render3d.mark_layout_dirty()
 
 	money = d["money"]
 	reputation = d["reputation"]
@@ -2101,161 +2125,42 @@ func _update_hud() -> void:
 
 
 # --- rendering ---
+#
+# The world itself is drawn in 3D by `render3d` (see Render3D.gd). What remains
+# here is everything that must stay in screen space: labels, the grid overlay,
+# and the selected aircraft's route. Those are positioned by projecting a world
+# point through the camera with `render3d.world_to_screen()`, so they track the
+# 3D scene exactly while staying upright and crisp at any camera angle.
 
-func _draw() -> void:
-	var view := get_viewport_rect()
-	draw_rect(view, Color(0.227, 0.361, 0.227), true)
-
-	var field := grid.grid_rect()
-	draw_rect(field, Color(0.19, 0.31, 0.19), true)
-	_draw_grid_lines(field)
-
-	for cell in grid.tiles:
-		match grid.tile_type(cell):
-			AirportGrid.TileType.TAXIWAY:
-				_draw_tile(cell, Color(0.40, 0.40, 0.43))
-			AirportGrid.TileType.TERMINAL:
-				_draw_tile(cell, Color(0.36, 0.33, 0.45))
-				draw_rect(_cell_rect(cell), Color(0.62, 0.58, 0.78), false, 1.5)
-			AirportGrid.TileType.ROAD:
-				_draw_tile(cell, Color(0.24, 0.24, 0.26))
-				var mid := grid.cell_to_world(cell)
-				draw_line(mid - Vector2(0, 5), mid + Vector2(0, 5), Color(0.85, 0.8, 0.4, 0.7), 1.0)
-			AirportGrid.TileType.PARKING:
-				_draw_tile(cell, Color(0.30, 0.31, 0.33))
-				var r := _cell_rect(cell).grow(-4.0)
-				# Bay markings, so a car park reads differently from taxiway at a glance.
-				for i in 3:
-					var x := r.position.x + r.size.x * (float(i) + 0.5) / 3.0
-					draw_line(Vector2(x, r.position.y), Vector2(x, r.end.y), Color(0.75, 0.75, 0.8, 0.5), 1.0)
-
-	for r in grid.runways:
-		_draw_runway(r)
-	for g in grid.gates:
-		_draw_gate(g)
-
-	_draw_selected_route()
-
-	for p in planes:
-		_draw_plane(p)
-
-	_draw_ghost()
-
-
-func _draw_grid_lines(field: Rect2) -> void:
-	var line_color := Color(1, 1, 1, 0.045)
-	for x in range(AirportGrid.COLS + 1):
-		var px: float = field.position.x + x * AirportGrid.TILE
-		draw_line(Vector2(px, field.position.y), Vector2(px, field.end.y), line_color, 1.0)
-	for y in range(AirportGrid.ROWS + 1):
-		var py: float = field.position.y + y * AirportGrid.TILE
-		draw_line(Vector2(field.position.x, py), Vector2(field.end.x, py), line_color, 1.0)
-
-
-func _cell_rect(cell: Vector2i) -> Rect2:
-	return Rect2(AirportGrid.ORIGIN + Vector2(cell) * AirportGrid.TILE, Vector2(AirportGrid.TILE, AirportGrid.TILE))
-
-
-func _draw_tile(cell: Vector2i, color: Color) -> void:
-	draw_rect(_cell_rect(cell), color, true)
-
-
-# Largest aircraft class a runway of this length can take, as a letter code.
-func _runway_capability(length: float) -> String:
-	for i in range(CLASSES.size() - 1, -1, -1):
-		if length >= CLASSES[i]["min_runway"]:
-			return CLASSES[i]["code"]
-	return "-"
-
-
-# The runway ghost is a rotated strip rather than highlighted cells, so what the
-# player sees while dragging matches the shape they will actually get.
-func _draw_runway_ghost() -> void:
-	if not is_dragging or not grid.in_bounds(drag_start):
+func _sync_world() -> void:
+	if render3d == null:
 		return
-	var pa := grid.cell_to_world(drag_start)
-	var pb := grid.cell_to_world(hover_cell)
-	var axis := pb - pa
-	if axis.length() < 0.001:
-		axis = Vector2.RIGHT
-	axis = axis.normalized()
-	var perp := Vector2(-axis.y, axis.x) * (AirportGrid.TILE * 0.42)
-	var ea := pa - axis * (AirportGrid.TILE * 0.5)
-	var eb := pb + axis * (AirportGrid.TILE * 0.5)
-
-	var ext := grid.runway_extend_target(pa, pb)
-	var span: float = pa.distance_to(pb) / AirportGrid.TILE
-	var cost := int(round(COST_RUNWAY_TILE * (span if ext >= 0 else span + 1.0)))
-	var ok := money >= cost and (ext >= 0 or grid.can_place_runway_seg(pa, pb))
-	var tint := Color(0.45, 0.95, 0.5, 0.4) if ok else Color(0.95, 0.35, 0.35, 0.4)
-
-	draw_colored_polygon(PackedVector2Array([ea + perp, eb + perp, eb - perp, ea - perp]), tint)
-	draw_polyline(PackedVector2Array([
-		ea + perp, eb + perp, eb - perp, ea - perp, ea + perp,
-	]), Color(tint.r, tint.g, tint.b, 0.95), 2.0)
+	render3d.rebuild_if_dirty()
+	render3d.sync_gates()
+	render3d.sync_planes(_plane_records())
+	_sync_ghost()
 
 
-func _draw_runway(r: Dictionary) -> void:
-	var a: Vector2 = r["a"]
-	var b: Vector2 = r["b"]
-	var axis := grid.runway_direction(r)
-	var perp := Vector2(-axis.y, axis.x) * (AirportGrid.TILE * 0.42)
-	# Overrun the ends by half a tile so the pavement covers the threshold cells.
-	var ea := a - axis * (AirportGrid.TILE * 0.5)
-	var eb := b + axis * (AirportGrid.TILE * 0.5)
-
-	var usable := grid.runway_is_usable(r)
-	var length: float = grid.runway_length_tiles(r)
-	var quad := PackedVector2Array([ea + perp, eb + perp, eb - perp, ea - perp])
-	draw_colored_polygon(quad, Color(0.28, 0.28, 0.30))
-	draw_dashed_line(a, b, Color(0.87, 0.87, 0.87, 0.8), 2.0, 12.0)
-
-	var label_color := Color(0.95, 0.55, 0.42) if r["occupied"] else Color(0.81, 0.91, 0.81)
-	if not usable:
-		label_color = Color(1.0, 0.45, 0.45)
-		draw_polyline(PackedVector2Array([
-			ea + perp, eb + perp, eb - perp, ea - perp, ea + perp,
-		]), Color(1.0, 0.35, 0.35, 0.9), 1.5)
-
-	var label := "RWY %s · %s · %s" % [grid.runway_name(r), length_str(length), _runway_capability(length)]
-	if length < float(AirportGrid.MIN_RUNWAY_LEN):
-		label += " (TOO SHORT)"
-	elif not usable:
-		label += " (NO TAXIWAY)"
-	draw_string(ThemeDB.fallback_font, a + Vector2(-14, -18), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_color)
-func _draw_gate(g: Dictionary) -> void:
-	var cells: Array = g["cells"]
-	var rect := _cell_rect(cells[0])
-	for c in cells:
-		rect = rect.merge(_cell_rect(c))
-
-	var connected := grid.gate_is_connected(g)
-	var fill := Color(0.75, 0.32, 0.25) if g["occupied"] else Color(0.18, 0.42, 0.18)
-	var outline := Color(1.0, 0.7, 0.63) if g["occupied"] else Color(0.61, 0.91, 0.61)
-	if not connected:
-		fill = Color(0.45, 0.35, 0.15)
-		outline = Color(1.0, 0.45, 0.45)
-
-	draw_rect(rect, fill, true)
-	draw_rect(rect, outline, false, 2.0)
-	var tag := "G%d%s" % [g["id"] + 1, "·W" if g["size"] >= 2 else ""]
-	draw_string(ThemeDB.fallback_font, rect.position + Vector2(6, 21), tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.95, 0.95, 0.95))
-	if not connected:
-		draw_string(ThemeDB.fallback_font, rect.position + Vector2(-6, -6), "unconnected", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1.0, 0.55, 0.55))
+# Altitude is a rendering concern only — the simulation is still purely 2D, and
+# deliberately so. Heights are eased rather than snapped so an aircraft rolling
+# out of LANDING doesn't drop through the runway in a single frame.
+const RENDER_ALT := {
+	"AIR_HOLD": 150.0, "APPROACH": 108.0, "INBOUND": 62.0, "CLIMB_OUT": 96.0,
+}
 
 
-func _draw_selected_route() -> void:
-	var p = find_plane(selected_plane_id)
-	if p == null or p["path"].is_empty():
-		return
-	var points := PackedVector2Array([p["pos"]])
-	for i in range(p["path_index"], p["path"].size()):
-		points.append(grid.cell_to_world(p["path"][i]))
-	if points.size() > 1:
-		draw_polyline(points, Color(1.0, 0.37, 0.82, 0.65), 3.0)
+func _altitude_of(p: Dictionary, dt: float) -> float:
+	var target: float = float(RENDER_ALT.get(p["state"], 0.0))
+	var cur: float = float(p.get("_render_alt", target))
+	var eased: float = cur + (target - cur) * minf(1.0, dt * 2.2)
+	p["_render_alt"] = eased
+	return eased
 
 
-func _draw_plane(p: Dictionary) -> void:
+# Carried over verbatim from the old 2D renderer so aircraft state stays as
+# readable as it was. The colour now tints a ground ring under the aircraft
+# rather than the aircraft itself, which keeps the model's own livery visible.
+func _plane_status_color(p: Dictionary) -> Color:
 	var color := Color(0.91, 0.91, 0.91)
 	match p["state"]:
 		"AIR_HOLD":
@@ -2271,19 +2176,156 @@ func _draw_plane(p: Dictionary) -> void:
 		color = Color(1.0, 0.25, 0.55)
 	if selected_plane_id == p["id"]:
 		color = Color(1.0, 0.37, 0.82)
+	return color
 
-	var pos: Vector2 = p["pos"]
-	var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
-	var side := Vector2(-fwd.y, fwd.x)
-	var s: float = class_of(p)["scale"]
 
-	draw_line(pos + side * 9.0 * s, pos - side * 9.0 * s, color.darkened(0.25), 3.0 * s)
-	draw_colored_polygon(PackedVector2Array([
-		pos + fwd * 13.0 * s,
-		pos - fwd * 8.0 * s + side * 6.0 * s,
-		pos - fwd * 8.0 * s - side * 6.0 * s,
-	]), color)
+func _plane_records() -> Array:
+	var dt := get_process_delta_time()
+	var out: Array = []
+	for p in planes:
+		out.append({
+			"id": p["id"],
+			"pos": p["pos"],
+			"heading": p["heading"],
+			"altitude": _altitude_of(p, dt),
+			"class_code": class_of(p)["code"],
+			"airline": p["airline"],
+			"status": _plane_status_color(p),
+		})
+	return out
 
+
+func _sync_ghost() -> void:
+	if tool == Tool.SELECT or not grid.in_bounds(hover_cell):
+		render3d.clear_ghost()
+		return
+
+	if tool == Tool.RUNWAY:
+		if not is_dragging or not grid.in_bounds(drag_start):
+			render3d.clear_ghost()
+			return
+		var pa := grid.cell_to_world(drag_start)
+		var pb := grid.cell_to_world(hover_cell)
+		var ext := grid.runway_extend_target(pa, pb)
+		var span: float = pa.distance_to(pb) / AirportGrid.TILE
+		var rcost := int(round(COST_RUNWAY_TILE * (span if ext >= 0 else span + 1.0)))
+		var rok := money >= rcost and (ext >= 0 or grid.can_place_runway_seg(pa, pb))
+		render3d.set_ghost_runway(pa, pb,
+			Color(0.45, 0.95, 0.5, 0.4) if rok else Color(0.95, 0.35, 0.35, 0.4))
+		return
+
+	var cells: Array = [hover_cell]
+	var ok := true
+	match tool:
+		Tool.TAXIWAY:
+			ok = grid.can_place_taxiway(hover_cell) and money >= COST_TAXIWAY
+		Tool.TERMINAL:
+			ok = grid.can_place_terminal(hover_cell) and money >= COST_TERMINAL_TILE
+		Tool.ROAD:
+			ok = grid.can_place_road(hover_cell) and money >= COST_ROAD_TILE
+		Tool.PARKING:
+			ok = grid.can_place_parking(hover_cell) and money >= COST_PARKING_TILE
+		Tool.GATE_SMALL, Tool.GATE_LARGE:
+			var size := tool_gate_size()
+			cells = grid.gate_cells_for(hover_cell, size)
+			ok = grid.can_place_gate(cells) and money >= COST_GATE_TILE * size
+		Tool.DEMOLISH:
+			var preview := grid.demolish_preview(hover_cell)
+			ok = not preview.is_empty()
+			if ok:
+				cells = preview["cells"]
+
+	var fill := Color(0.4, 1.0, 0.5, 0.35) if ok else Color(1.0, 0.3, 0.3, 0.35)
+	if tool == Tool.DEMOLISH and ok:
+		fill = Color(1.0, 0.65, 0.2, 0.4)
+	render3d.set_ghost_cells(cells, fill)
+
+
+# --- screen-space overlay ---------------------------------------------------
+
+func _draw() -> void:
+	if render3d == null or setup_stage < 2:
+		return
+
+	_draw_grid_overlay()
+	_draw_selected_route()
+
+	for r in grid.runways:
+		_label_runway(r)
+	for g in grid.gates:
+		_label_gate(g)
+	for p in planes:
+		_label_plane(p)
+
+	_draw_ghost_label()
+
+
+# The faint buildable-area grid. Projecting the ground endpoints rather than
+# drawing screen-aligned lines means it lands exactly on the 3D ground plane and
+# stays correct through every camera rotation.
+func _draw_grid_overlay() -> void:
+	var line_color := Color(1, 1, 1, 0.05)
+	var o := AirportGrid.ORIGIN
+	var t: float = AirportGrid.TILE
+	var w: float = AirportGrid.COLS * t
+	var h: float = AirportGrid.ROWS * t
+	for x in range(AirportGrid.COLS + 1):
+		var px: float = o.x + x * t
+		draw_line(render3d.world_to_screen(Vector2(px, o.y)),
+			render3d.world_to_screen(Vector2(px, o.y + h)), line_color, 1.0)
+	for y in range(AirportGrid.ROWS + 1):
+		var py: float = o.y + y * t
+		draw_line(render3d.world_to_screen(Vector2(o.x, py)),
+			render3d.world_to_screen(Vector2(o.x + w, py)), line_color, 1.0)
+
+
+func _draw_selected_route() -> void:
+	var p = find_plane(selected_plane_id)
+	if p == null or p["path"].is_empty():
+		return
+	var points := PackedVector2Array([render3d.world_to_screen(p["pos"], Render3D.H_MARKING)])
+	for i in range(p["path_index"], p["path"].size()):
+		points.append(render3d.world_to_screen(
+			grid.cell_to_world(p["path"][i]), Render3D.H_MARKING))
+	if points.size() > 1:
+		draw_polyline(points, Color(1.0, 0.37, 0.82, 0.65), 3.0)
+
+
+func _label_runway(r: Dictionary) -> void:
+	var length: float = grid.runway_length_tiles(r)
+	var usable: bool = grid.runway_is_usable(r)
+	var label_color := Color(0.95, 0.55, 0.42) if r["occupied"] else Color(0.81, 0.91, 0.81)
+	if not usable:
+		label_color = Color(1.0, 0.45, 0.45)
+
+	var label := "RWY %s · %s · %s" % [
+		grid.runway_name(r), length_str(length), _runway_capability(length),
+	]
+	if length < float(AirportGrid.MIN_RUNWAY_LEN):
+		label += " (TOO SHORT)"
+	elif not usable:
+		label += " (NO TAXIWAY)"
+	var at: Vector2 = render3d.world_to_screen(r["a"], Render3D.H_MARKING) + Vector2(-14, -10)
+	draw_string(ThemeDB.fallback_font, at, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_color)
+
+
+func _label_gate(g: Dictionary) -> void:
+	var cells: Array = g["cells"]
+	var centre := Vector2.ZERO
+	for c in cells:
+		centre += grid.cell_to_world(c)
+	centre /= float(cells.size())
+
+	var tag := "G%d%s" % [g["id"] + 1, "·W" if g["size"] >= 2 else ""]
+	var at: Vector2 = render3d.world_to_screen(centre, Render3D.H_GATE) + Vector2(-10, 4)
+	draw_string(ThemeDB.fallback_font, at, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 12,
+		Color(0.95, 0.95, 0.95))
+	if not grid.gate_is_connected(g):
+		draw_string(ThemeDB.fallback_font, at + Vector2(-8, -14), "unconnected",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1.0, 0.55, 0.55))
+
+
+func _label_plane(p: Dictionary) -> void:
 	var label: String = "%s [%s]" % [p["callsign"], class_of(p)["code"]]
 	if p.get("emergency", false):
 		label = "!! " + label
@@ -2298,50 +2340,34 @@ func _draw_plane(p: Dictionary) -> void:
 			label += " (holding short)"
 	if p["blocked_timer"] > 1.0:
 		label += " !"
+
+	var alt: float = float(p.get("_render_alt", 0.0))
+	var at: Vector2 = render3d.world_to_screen(p["pos"], alt + 18.0) + Vector2(-22, -6)
 	# Skip the label while the aircraft is still flying in from off-map, or it
-	# renders as clipped text jammed against the left edge.
-	if pos.x > 28.0:
-		draw_string(ThemeDB.fallback_font, pos + Vector2(-22, -16), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 1))
-
-
-func _draw_ghost() -> void:
-	if tool == Tool.SELECT or not grid.in_bounds(hover_cell):
+	# renders as clipped text jammed against the screen edge.
+	if at.x < 28.0:
 		return
+	draw_string(ThemeDB.fallback_font, at, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 10,
+		Color(1, 1, 1))
 
-	var cells: Array = [hover_cell]
-	var ok := true
 
-	match tool:
-		Tool.TAXIWAY:
-			ok = grid.can_place_taxiway(hover_cell) and money >= COST_TAXIWAY
-		Tool.TERMINAL:
-			ok = grid.can_place_terminal(hover_cell) and money >= COST_TERMINAL_TILE
-		Tool.ROAD:
-			ok = grid.can_place_road(hover_cell) and money >= COST_ROAD_TILE
-		Tool.PARKING:
-			ok = grid.can_place_parking(hover_cell) and money >= COST_PARKING_TILE
-		Tool.GATE_SMALL, Tool.GATE_LARGE:
-			var size := tool_gate_size()
-			cells = grid.gate_cells_for(hover_cell, size)
-			ok = grid.can_place_gate(cells) and money >= COST_GATE_TILE * size
-		Tool.RUNWAY:
-			# Drawn separately as a rotated strip, not as grid cells.
-			_draw_runway_ghost()
-			return
-		Tool.DEMOLISH:
-			var preview := grid.demolish_preview(hover_cell)
-			ok = not preview.is_empty()
-			if ok:
-				cells = preview["cells"]
+func _draw_ghost_label() -> void:
+	if tool != Tool.RUNWAY or not is_dragging or not grid.in_bounds(drag_start):
+		return
+	var pa := grid.cell_to_world(drag_start)
+	var pb := grid.cell_to_world(hover_cell)
+	var ext := grid.runway_extend_target(pa, pb)
+	var span: float = pa.distance_to(pb) / AirportGrid.TILE
+	var total: float = span if ext >= 0 else span + 1.0
+	var cost := int(round(COST_RUNWAY_TILE * total))
+	var at: Vector2 = render3d.world_to_screen(pb, Render3D.H_GHOST) + Vector2(-10, -18)
+	draw_string(ThemeDB.fallback_font, at, "%s — %s" % [length_str(total), money_str(cost)],
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1))
 
-	var fill := Color(0.4, 1.0, 0.5, 0.3) if ok else Color(1.0, 0.3, 0.3, 0.3)
-	if tool == Tool.DEMOLISH and ok:
-		fill = Color(1.0, 0.65, 0.2, 0.35)
-	for c in cells:
-		if grid.in_bounds(c):
-			draw_rect(_cell_rect(c), fill, true)
 
-	if tool == Tool.RUNWAY and cells.size() > 1:
-		var cost := COST_RUNWAY_TILE * cells.size()
-		var anchor := grid.cell_to_world(cells[0]) + Vector2(-10, -16)
-		draw_string(ThemeDB.fallback_font, anchor, "%s — %s" % [length_str(cells.size()), money_str(cost)], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1))
+# Largest aircraft class a runway of this length can take, as a letter code.
+func _runway_capability(length: float) -> String:
+	for i in range(CLASSES.size() - 1, -1, -1):
+		if length >= CLASSES[i]["min_runway"]:
+			return CLASSES[i]["code"]
+	return "-"

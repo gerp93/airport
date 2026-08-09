@@ -17,19 +17,46 @@ approved by the human and added to KVG_Standards first.
 
 ## Architecture
 
-Two scripts, split along a deliberate seam:
+Four scripts, split along deliberate seams:
 
 - `AirportGrid.gd` — tile map, runway/stand entities, `AStarGrid2D` taxi
   pathfinding, placement validation, per-tile claims, landside road network,
-  and layout serialization.
+  and layout serialization. Contains **no drawing code at all**, which is what
+  made the 3D port a renderer swap rather than a rewrite.
 - `Regions.gd` — continents, regions, their origin airports and weather
   tables. Place names are invented, so nothing claims to describe a real
   airport.
 - `Main.gd` — aircraft state machine, economy, facilities, airline
-  relationships, build tools, HUD, and all rendering.
+  relationships, build tools, HUD, and the screen-space overlay.
+- `Render3D.gd` — all world geometry, camera and lighting. Knows nothing about
+  money, airlines or aircraft states: `Main.gd` hands it plain render records.
 
-Everything is drawn in one `_draw()` with no sprites. That's the known
-shortcut to revisit when real art exists — see `TODO.md`.
+### Rendering is 3D isometric, but the simulation is still 2D
+
+The world is drawn in real 3D under an orthographic camera at true isometric
+angles. **The simulation itself never gained a third axis** — it is still
+`Vector2` world coordinates throughout, and `Render3D.w3()` maps them to 3D as
+`(x, height, y)`. Altitude exists only in the renderer (`RENDER_ALT` in
+`Main.gd`), derived from aircraft state. Don't push height into the sim.
+
+Three consequences worth knowing before editing:
+
+- **`Main` is still a `Node2D`** with a `Node3D` child. That is deliberate, not
+  an oversight: 3D renders through the viewport's `World3D` regardless of the
+  parent being 2D, which keeps `_draw()` available for labels and leaves the
+  `$UI` CanvasLayer untouched.
+- **Text is not drawn in 3D.** Every label is screen-space `draw_string()` in
+  `Main._draw()`, positioned by `render3d.world_to_screen()`. Screen-space text
+  stays upright and crisp at any camera angle; billboarded `Label3D` does not.
+- **The mouse is a ray now.** Under the old top-down view the mouse position
+  *was* the world position. Any new input code must go through
+  `render3d.screen_to_world()` first.
+
+Static geometry rebuilds only when the layout actually changes
+(`mark_layout_dirty()`), because stand occupancy flips constantly while the
+layout does not. Aircraft use `assets/models/widebody-airliner.glb`, whose
+`livery` material is separate from `shell` — so per-airline colours are a
+material override, not an art pipeline.
 
 Aircraft state flow:
 
@@ -47,6 +74,12 @@ endpoints in world space, with a rasterized footprint tracked only for
 blocking and demolition. Taxiways and stands *are* on the grid. Don't
 "simplify" a runway back into a row of cells — that restricts headings to the
 eight compass points and was removed on purpose.
+
+**Aircraft are drawn oversized on purpose.** The model is real-world scale
+(65.8 units nose-to-tail); at `FEET_PER_TILE = 600` that is 0.36 of a tile and
+effectively invisible. `Render3D.PLANE_SCALE_FUDGE` multiplies it, exactly as
+the old 2D renderer drew a 21px narrowbody against a 32px tile. Same rule as
+`REVENUE_SCALE` below: keep the lie in that one constant.
 
 **`REVENUE_SCALE` is a deliberate lie.** Capital costs in `Main.gd` are real
 2020s figures (runway pavement ~$2,500/linear ft, ATC tower ~$28M). Real

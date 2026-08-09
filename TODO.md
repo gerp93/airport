@@ -6,9 +6,14 @@ and this repo's `REPO_SCOPE.md` entry for that). Just what's not built yet.
 
 ## Features
 
-- Real art: split aircraft and stands into scenes with `AnimatedSprite2D`.
-  Everything is drawn procedurally in a single `_draw()` today, which is the
-  deliberate shortcut to revisit once art exists.
+- More aircraft models. Rendering is 3D isometric now and aircraft use a real
+  mesh, but there is only one — a widebody, scaled down to stand in for the
+  Regional and Narrowbody classes. Each class wants its own model.
+- Buildings and ground clutter are still untextured boxes. Concourses, car
+  parks and the tower would all benefit from real meshes now that there is a
+  3D pipeline to hang them on.
+- Batch the ground plane. `Render3D` currently emits one `MeshInstance3D` per
+  tile, which is fine at 32x18 but wants a `MultiMesh` before the grid grows.
 - Runway direction and wind, so crosswind weather favours an alignment
   instead of just closing short runways.
 - De-icing as a winter-specific facility, tied to snow regions.
