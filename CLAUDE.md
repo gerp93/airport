@@ -10,10 +10,13 @@ See that repo's `game-repos.md` for which standards apply to game repos and
 which deliberately don't, and its `REPO_SCOPE.md` entry for this repo's
 current scope and open compliance items.
 
-Godot is not yet a stack KVG_Standards covers for release/CI, theming,
-update-check, or icon generation. Per that repo's "New tech stacks" process,
-those gaps are **not to be papered over locally here** — they need a design
-approved by the human and added to KVG_Standards first.
+Release/CI (`release-godot.yml`, called from `auto-release.yml` and
+`cut-release.yml`) and update-check (`addons/kvg_update`, vendored from
+`packages/godot/kvg_update` — see `scripts/update-kvg-update.sh`) are
+covered by KVG_Standards and already wired up here. Theming and icon
+generation are **not yet** covered for Godot — per that repo's "New tech
+stacks" process, that gap is **not to be papered over locally here** — it
+needs a design approved by the human and added to KVG_Standards first.
 
 ## Architecture
 
