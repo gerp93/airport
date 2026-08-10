@@ -2493,9 +2493,14 @@ func load_game(slot: int = -1) -> void:
 	if continent_idx >= 0:
 		continent_name = Regions.CONTINENTS[continent_idx]["name"]
 		for r in Regions.CONTINENTS[continent_idx]["regions"]:
-			if r["name"] == d["region_name"]:
+			if r["name"] == d.get("region_name", ""):
 				region = r
 		setup_stage = 2
+		# Without this a restored save rendered with the fallback temperate
+		# palette and no terrain at all: set_terrain had exactly one call site,
+		# in _choose_setup, which loading never goes through.
+		if region.has("terrain"):
+			render3d.set_terrain(Regions.TERRAIN[region["terrain"]])
 		_show_setup()
 	offer = d.get("offer", offer)
 	next_offer_at = d.get("next_offer_at", next_offer_at)

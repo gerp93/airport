@@ -24,6 +24,12 @@ const MainScript = preload("res://Main.gd")
 func _ready() -> void:
 	var main = preload("res://Main.tscn").instantiate()
 	add_child(main)
+	# Pick a region, or _terrain stays empty, _build_terrain_features() returns
+	# immediately and the whole scenery path goes untested by both harnesses.
+	# Pacific Northwest is `forest`, density 320 — the heaviest case — and this
+	# also exercises set_terrain()'s full-rebuild reset.
+	main._choose_setup(0)
+	main._choose_setup(2)
 	await get_tree().process_frame
 	await get_tree().process_frame
 

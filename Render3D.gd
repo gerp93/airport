@@ -103,6 +103,16 @@ var _terrain: Dictionary = {}
 var _weather_kind := ""
 var _weather: CPUParticles3D
 
+var _ground_root: Node3D
+var _scenery_root: Node3D
+var _tiles_root: Node3D
+var _terminal_root: Node3D
+var _runway_root: Node3D
+var _stand_root: Node3D
+
+var _scenery_built := false
+var _ground_mask := -1
+
 var _yaw_deg := ISO_YAW_DEG
 var _pan := Vector2.ZERO
 var _zoom := 1.0
@@ -118,6 +128,12 @@ func _ready() -> void:
 	_build_camera()
 	_static_root = Node3D.new()
 	add_child(_static_root)
+	# One root per rebuild tier, so a layout change never touches scenery.
+	for holder in ["_ground_root", "_scenery_root", "_tiles_root", "_terminal_root",
+			"_runway_root", "_stand_root"]:
+		var n := Node3D.new()
+		_static_root.add_child(n)
+		set(holder, n)
 	_plane_root = Node3D.new()
 	add_child(_plane_root)
 	_ghost_root = Node3D.new()
@@ -166,19 +182,113 @@ func _mat(key: String, c: Color, transparent: bool = false) -> StandardMaterial3
 	return m
 
 
+# One shared unit cube, scaled per instance, rather than a fresh BoxMesh per
+# call. A full rebuild made on the order of a thousand of those, and pushing that
+# many new vertex buffers to the server cost more than the node churn did.
+#
+# Node3D applies scale before rotation, so scaling a unit box reproduces the old
+# `box.size = size` transform exactly. Box normals stay axis-aligned under
+# axis-aligned scale, so shading is unchanged too.
+var _unit_box: BoxMesh
+
+
 func _slab(parent: Node3D, size: Vector3, centre: Vector3, mat: Material, yaw: float = 0.0) -> MeshInstance3D:
-	var box := BoxMesh.new()
-	box.size = size
+	if _unit_box == null:
+		_unit_box = BoxMesh.new()
+		_unit_box.size = Vector3.ONE
 	var mi := MeshInstance3D.new()
-	mi.mesh = box
+	mi.mesh = _unit_box
 	mi.material_override = mat
 	mi.position = centre
+	mi.scale = size
 	mi.rotation = Vector3(0.0, yaw, 0.0)
 	parent.add_child(mi)
 	return mi
 
 
 # --- camera + lighting ------------------------------------------------------
+
+# --- batching ---------------------------------------------------------------
+#
+# Per-tile geometry is accumulated by (mesh, material) and flushed into one
+# MultiMeshInstance3D per group. Accumulate-then-flush keeps the fill a single
+# tight pass with no capacity juggling inside the build loops.
+
+var _batches := {}
+var _unit_cone: CylinderMesh
+var _unit_cyl: CylinderMesh
+var _unit_sphere: SphereMesh
+
+
+func _mesh_for(shape: String) -> Mesh:
+	match shape:
+		"cone":
+			if _unit_cone == null:
+				_unit_cone = CylinderMesh.new()
+				_unit_cone.top_radius = 0.0
+				_unit_cone.bottom_radius = 0.5
+				_unit_cone.height = 1.0
+				# Must match the old _cone() silhouette exactly.
+				_unit_cone.radial_segments = 7
+			return _unit_cone
+		"cyl":
+			if _unit_cyl == null:
+				_unit_cyl = CylinderMesh.new()
+				_unit_cyl.top_radius = 0.5
+				_unit_cyl.bottom_radius = 0.5
+				_unit_cyl.height = 1.0
+				_unit_cyl.radial_segments = 6
+			return _unit_cyl
+		"sphere":
+			if _unit_sphere == null:
+				_unit_sphere = SphereMesh.new()
+				_unit_sphere.radius = 0.5
+				_unit_sphere.height = 1.0
+			return _unit_sphere
+	if _unit_box == null:
+		_unit_box = BoxMesh.new()
+		_unit_box.size = Vector3.ONE
+	return _unit_box
+
+
+# Basis must be rotation * scale (local axes). Basis.scaled() post-multiplies,
+# which scales along GLOBAL axes and silently skews every rotated runway into
+# something that still looks plausible.
+func _add(key: String, shape: String, mat: Material, size: Vector3, centre: Vector3,
+		yaw: float = 0.0) -> void:
+	var b := Basis(Vector3.UP, yaw) * Basis.from_scale(size)
+	if not _batches.has(key):
+		_batches[key] = {"shape": shape, "mat": mat, "x": []}
+	(_batches[key]["x"] as Array).append(Transform3D(b, centre))
+
+
+func _flush_batches(root: Node3D) -> void:
+	for key in _batches:
+		var b: Dictionary = _batches[key]
+		var xforms: Array = b["x"]
+		if xforms.is_empty():
+			continue
+		var mm := MultiMesh.new()
+		# Format flags must be set BEFORE instance_count — changing either
+		# afterwards wipes the buffer.
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _mesh_for(b["shape"])
+		mm.instance_count = xforms.size()
+		for i in xforms.size():
+			mm.set_instance_transform(i, xforms[i])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = b["mat"]
+		# Without an explicit AABB the server recomputes bounds across every
+		# instance each time the buffer changes — the exact O(n) cost being
+		# removed here.
+		var g: Rect2 = grid.grid_rect()
+		mmi.custom_aabb = AABB(
+			Vector3(g.position.x - 2000.0, -400.0, g.position.y - 2000.0),
+			Vector3(g.size.x + 4000.0, 900.0, g.size.y + 4000.0))
+		root.add_child(mmi)
+	_batches.clear()
+
 
 func _build_environment() -> void:
 	var env := Environment.new()
@@ -312,34 +422,89 @@ func world_to_screen(w: Vector2, height: float = 0.0) -> Vector2:
 
 # --- static geometry --------------------------------------------------------
 
+# Rebuilds are split by how expensive a category is to regenerate, not by who
+# changed it. The public API stays `mark_layout_dirty()` with no arguments on
+# purpose: the caller cannot know which categories it invalidated. Painting a
+# taxiway three tiles from a runway flips that runway's centreline from red to
+# white via runway_is_usable(), so any caller-supplied category would be wrong.
 func rebuild_if_dirty() -> void:
-	if not _layout_dirty or grid == null:
+	if grid == null:
+		return
+
+	# Session-static: scenery only changes when the region does.
+	if not _scenery_built:
+		_scenery_built = true
+		_rebuild_scenery()
+
+	# Rarely dirty: ground follows land ownership, and so does the framing.
+	var mask := _owned_mask()
+	if mask != _ground_mask:
+		_ground_mask = mask
+		_rebuild_ground()
+		_apply_camera()
+
+	if not _layout_dirty:
 		return
 	_layout_dirty = false
-	_rebuild_static()
-	# Buying land widens the owned area, so the framing has to be recomputed.
-	# Harmless on every other layout change: the size only moves when the owned
-	# bounds actually move, and pan/zoom are preserved.
-	_apply_camera()
+	_rebuild_layout()
 
 
-func _rebuild_static() -> void:
-	for c in _static_root.get_children():
-		c.queue_free()
+# Exact and cheap — tracts are only ever added by buy_tract() or replaced
+# wholesale by from_dict(), and a bitmask catches both without hashing.
+func _owned_mask() -> int:
+	var m := 0
+	for i in grid.owned_tracts:
+		m |= 1 << int(i)
+	return m
+
+
+func _clear(root: Node3D) -> void:
+	# free(), not queue_free(): the frees would otherwise be deferred to end of
+	# frame while sync_stands() runs against _stand_nodes in this same frame.
+	for c in root.get_children():
+		root.remove_child(c)
+		c.free()
+
+
+func _rebuild_scenery() -> void:
+	_clear(_scenery_root)
+	_build_terrain_features()
+	_build_compass()
+	_flush_batches(_scenery_root)
+
+
+func _rebuild_ground() -> void:
+	_clear(_ground_root)
+	_build_ground()
+
+
+func _rebuild_layout() -> void:
+	_clear(_tiles_root)
+	_clear(_terminal_root)
+	_clear(_runway_root)
+	_clear(_stand_root)
 	_stand_nodes.clear()
 
-	_build_ground()
 	_build_tiles()
+	_flush_batches(_tiles_root)
 	_build_terminals()
+	_flush_batches(_terminal_root)
 	_build_runways()
+	_flush_batches(_runway_root)
 	_build_stands()
 
 
 # Terrain is cosmetic and arrives only once the player picks a region, which is
-# after the renderer already exists — so it is applied late and forces a rebuild.
+# after the renderer already exists — so it is applied late.
+#
+# This MUST invalidate every tier. _mats.clear() orphans the cached materials
+# while existing batches still hold material_override references to the old
+# objects, so anything not rebuilt would silently keep the fallback colours.
 func set_terrain(t: Dictionary) -> void:
 	_terrain = t
 	_mats.clear()
+	_scenery_built = false
+	_ground_mask = -1
 	mark_layout_dirty()
 
 
@@ -353,7 +518,7 @@ func _build_ground() -> void:
 	var r: Rect2 = grid.grid_rect()
 	# A skirt well beyond the buildable area, so the field does not simply end in
 	# mid-air at this camera angle.
-	_slab(_static_root, Vector3(r.size.x * 4.0, 2.0, r.size.y * 4.0),
+	_slab(_ground_root, Vector3(r.size.x * 4.0, 2.0, r.size.y * 4.0),
 		w3(r.position + r.size * 0.5, -2.0),
 		_mat("skirt", _terrain_color("surround", COL_OUTSIDE)))
 	# Owned land is drawn as the airport's own ground; buyable tracts are drawn
@@ -379,7 +544,7 @@ func _tract_slab(r: Rect2i, mat: Material, y: float) -> void:
 	var t: float = AirportGrid.TILE
 	var pos: Vector2 = AirportGrid.ORIGIN + Vector2(r.position) * t
 	var size: Vector2 = Vector2(r.size) * t
-	_slab(_static_root, Vector3(size.x, 2.0, size.y), w3(pos + size * 0.5, y), mat)
+	_slab(_ground_root, Vector3(size.x, 2.0, size.y), w3(pos + size * 0.5, y), mat)
 
 
 # Scatter whatever the region grows outside the fence. Deterministic from the
@@ -439,55 +604,30 @@ func _spawn_feature(kind: String, p: Vector2, rng: RandomNumberGenerator,
 		"mesas":
 			var mh: float = rng.randf_range(14.0, 34.0)
 			var mw: float = mh * rng.randf_range(0.8, 1.5)
-			var mi := _slab(_static_root, Vector3(mw, mh, mw * rng.randf_range(0.6, 1.0)),
-				w3(p, mh * 0.5), body)
-			mi.rotation.y = rng.randf_range(0.0, TAU)
+			_add("mesa", "box", body, Vector3(mw, mh, mw * rng.randf_range(0.6, 1.0)),
+				w3(p, mh * 0.5), rng.randf_range(0.0, TAU))
 		"dunes":
 			var dh: float = rng.randf_range(6.0, 16.0)
-			var sm := SphereMesh.new()
-			sm.radius = dh * rng.randf_range(2.2, 4.0)
-			sm.height = dh * 2.0
-			var d := MeshInstance3D.new()
-			d.mesh = sm
-			d.material_override = body
-			d.position = w3(p, 0.0)
-			_static_root.add_child(d)
+			var dr: float = dh * rng.randf_range(2.2, 4.0)
+			# SphereMesh already took radius and height independently, i.e. it was
+			# an ellipsoid; non-uniform scale of a unit sphere is the same shape.
+			_add("dune", "sphere", body, Vector3(dr * 2.0, dh * 2.0, dr * 2.0), w3(p, 0.0))
 		"scrub":
 			var sh: float = rng.randf_range(3.0, 7.0)
-			var s2 := SphereMesh.new()
-			s2.radius = sh
-			s2.height = sh * 1.4
-			var b := MeshInstance3D.new()
-			b.mesh = s2
-			b.material_override = body
-			b.position = w3(p, sh * 0.4)
-			_static_root.add_child(b)
+			_add("scrub", "sphere", body, Vector3(sh * 2.0, sh * 1.4, sh * 2.0), w3(p, sh * 0.4))
 
 
+# Scenery cones and cylinders batch against shared unit meshes. Curved surfaces
+# do get skewed normals under non-uniform scale, but the old code already set
+# radius and height independently, so the result is identical.
 func _cone(p: Vector2, radius: float, height: float, mat: Material, base: float = 0.0) -> void:
-	var cm := CylinderMesh.new()
-	cm.top_radius = 0.0
-	cm.bottom_radius = radius
-	cm.height = height
-	cm.radial_segments = 7
-	var mi := MeshInstance3D.new()
-	mi.mesh = cm
-	mi.material_override = mat
-	mi.position = w3(p, base + height * 0.5)
-	_static_root.add_child(mi)
+	_add("cone_" + str(mat.get_instance_id()), "cone", mat,
+		Vector3(radius * 2.0, height, radius * 2.0), w3(p, base + height * 0.5))
 
 
 func _cylinder(p: Vector2, radius: float, height: float, mat: Material) -> void:
-	var cm := CylinderMesh.new()
-	cm.top_radius = radius
-	cm.bottom_radius = radius
-	cm.height = height
-	cm.radial_segments = 6
-	var mi := MeshInstance3D.new()
-	mi.mesh = cm
-	mi.material_override = mat
-	mi.position = w3(p, height * 0.5)
-	_static_root.add_child(mi)
+	_add("cyl_" + str(mat.get_instance_id()), "cyl", mat,
+		Vector3(radius * 2.0, height, radius * 2.0), w3(p, height * 0.5))
 
 
 # A compass rose painted on the field's north-west corner. World -y is north (the
@@ -509,11 +649,11 @@ func _build_compass() -> void:
 	rm.mesh = ring
 	rm.material_override = ink
 	rm.position = w3(c, H_MARKING)
-	_static_root.add_child(rm)
+	_scenery_root.add_child(rm)
 
 	# North needle, then a shorter cross-bar for the other three points.
-	_slab(_static_root, Vector3(4.0, 0.6, 54.0), w3(c + Vector2(0.0, -6.0), H_MARKING), ink)
-	_slab(_static_root, Vector3(40.0, 0.6, 3.0), w3(c, H_MARKING), ink)
+	_slab(_scenery_root, Vector3(4.0, 0.6, 54.0), w3(c + Vector2(0.0, -6.0), H_MARKING), ink)
+	_slab(_scenery_root, Vector3(40.0, 0.6, 3.0), w3(c, H_MARKING), ink)
 
 	var n := Label3D.new()
 	n.text = "N"
@@ -525,7 +665,7 @@ func _build_compass() -> void:
 	n.no_depth_test = false
 	n.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
 	n.position = w3(c + Vector2(0.0, -46.0), H_MARKING)
-	_static_root.add_child(n)
+	_scenery_root.add_child(n)
 
 
 func _build_tiles() -> void:
@@ -536,18 +676,17 @@ func _build_tiles() -> void:
 
 		match type:
 			AirportGrid.TileType.TAXIWAY:
-				_slab(_static_root, Vector3(t, H_PAVEMENT, t), w3(centre, H_PAVEMENT * 0.5),
-					_mat("taxi", COL_TAXIWAY))
+				_add("taxi", "box", _mat("taxi", COL_TAXIWAY),
+					Vector3(t, H_PAVEMENT, t), w3(centre, H_PAVEMENT * 0.5))
 			AirportGrid.TileType.ROAD:
 				_build_road_tile(cell, centre)
 			AirportGrid.TileType.PARKING:
-				_slab(_static_root, Vector3(t, H_PAVEMENT, t), w3(centre, H_PAVEMENT * 0.5),
-					_mat("park", COL_PARKING))
+				_add("park", "box", _mat("park", COL_PARKING),
+					Vector3(t, H_PAVEMENT, t), w3(centre, H_PAVEMENT * 0.5))
 				for i in 3:
 					var off: float = t * ((float(i) + 0.5) / 3.0 - 0.5)
-					_slab(_static_root, Vector3(1.4, 0.6, t * 0.62),
-						w3(centre + Vector2(off, 0.0), H_MARKING),
-						_mat("baymark", Color(0.75, 0.75, 0.8)))
+					_add("baymark", "box", _mat("baymark", Color(0.75, 0.75, 0.8)),
+						Vector3(1.4, 0.6, t * 0.62), w3(centre + Vector2(off, 0.0), H_MARKING))
 			AirportGrid.TileType.TERMINAL:
 				pass  # Merged into runs below, so a concourse reads as one building.
 
@@ -562,7 +701,7 @@ func _build_road_tile(cell: Vector2i, centre: Vector2) -> void:
 	var mat := _mat("road", COL_ROAD)
 	var mark := _mat("roadmark", Color(0.85, 0.8, 0.4))
 
-	_slab(_static_root, Vector3(w, H_PAVEMENT, w), w3(centre, H_PAVEMENT * 0.5), mat)
+	_add("road", "box", mat, Vector3(w, H_PAVEMENT, w), w3(centre, H_PAVEMENT * 0.5))
 
 	for d in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
 		var n: Vector2i = cell + d
@@ -579,10 +718,10 @@ func _build_road_tile(cell: Vector2i, centre: Vector2) -> void:
 		var size := Vector3(w, H_PAVEMENT, t * 0.5)
 		if absf(v.x) > 0.0:
 			size = Vector3(t * 0.5, H_PAVEMENT, w)
-		_slab(_static_root, size, w3(arm, H_PAVEMENT * 0.5), mat)
+		_add("road", "box", mat, size, w3(arm, H_PAVEMENT * 0.5))
 
 		var dash := Vector3(w * 0.34, 0.6, 1.6) if absf(v.x) > 0.0 else Vector3(1.6, 0.6, w * 0.34)
-		_slab(_static_root, dash, w3(centre + v * (t * 0.3), H_MARKING), mark)
+		_add("roadmark", "box", mark, dash, w3(centre + v * (t * 0.3), H_MARKING))
 
 
 # A concourse is one building, not a row of huts. Adjacent TERMINAL tiles are
@@ -614,10 +753,10 @@ func _build_terminals() -> void:
 
 		var centre: Vector2 = grid.cell_to_world(start) + Vector2((float(run) - 1.0) * t * 0.5, 0.0)
 		var width: float = float(run) * t
-		_slab(_static_root, Vector3(width, H_TERMINAL, t), w3(centre, H_TERMINAL * 0.5),
-			_mat("term", COL_TERMINAL))
-		_slab(_static_root, Vector3(width, H_KERB, t), w3(centre, H_TERMINAL + H_KERB * 0.5),
-			_mat("termedge", COL_TERMINAL_EDGE))
+		_add("term", "box", _mat("term", COL_TERMINAL),
+			Vector3(width, H_TERMINAL, t), w3(centre, H_TERMINAL * 0.5))
+		_add("termedge", "box", _mat("termedge", COL_TERMINAL_EDGE),
+			Vector3(width, H_KERB, t), w3(centre, H_TERMINAL + H_KERB * 0.5))
 		i += run
 
 
@@ -635,15 +774,17 @@ func _build_runways() -> void:
 		# no eight-compass-point restriction — the reason 3D suits this game
 		# better than isometric sprites, which need one sprite per heading.
 		var yaw := -axis.angle()
-		_slab(_static_root, Vector3(length, H_PAVEMENT, t * RUNWAY_WIDTH_TILES),
-			w3((ea + eb) * 0.5, H_PAVEMENT * 0.5), _mat("rwy", COL_RUNWAY), yaw)
+		_add("rwy", "box", _mat("rwy", COL_RUNWAY),
+			Vector3(length, H_PAVEMENT, t * RUNWAY_WIDTH_TILES),
+			w3((ea + eb) * 0.5, H_PAVEMENT * 0.5), yaw)
 
 		var usable: bool = grid.runway_is_usable(r)
 		var mark := _mat("rwymark", COL_MARKING) if usable else _mat("rwybad", Color(1.0, 0.35, 0.35))
 		var dashes := maxi(int(length / 24.0), 1)
 		for i in dashes:
 			var f: float = (float(i) + 0.5) / float(dashes)
-			_slab(_static_root, Vector3(12.0, 0.6, 1.8), w3(ea.lerp(eb, f), H_MARKING), mark, yaw)
+			_add("rwymark_" + ("ok" if usable else "bad"), "box", mark,
+				Vector3(12.0, 0.6, 1.8), w3(ea.lerp(eb, f), H_MARKING), yaw)
 
 		# Threshold designators, painted on the pavement at each end.
 		var ends: Array = grid.runway_end_labels(r)
@@ -668,7 +809,7 @@ func _paint_designator(text: String, at: Vector2, facing: Vector2) -> void:
 	# Lay it flat (-90 about X), then spin it so its "up" runs down the strip.
 	l.rotation_degrees = Vector3(-90.0, rad_to_deg(-facing.angle() - PI * 0.5), 0.0)
 	l.position = w3(at, H_MARKING)
-	_static_root.add_child(l)
+	_runway_root.add_child(l)
 
 
 func _build_stands() -> void:
@@ -676,7 +817,7 @@ func _build_stands() -> void:
 	for g in grid.stands:
 		var nodes: Array = []
 		for c in g["cells"]:
-			nodes.append(_slab(_static_root, Vector3(t * 0.96, H_STAND, t * 0.96),
+			nodes.append(_slab(_stand_root, Vector3(t * 0.96, H_STAND, t * 0.96),
 				w3(grid.cell_to_world(c), H_STAND * 0.5), _mat("standfree", COL_STAND_FREE)))
 		_stand_nodes[g["id"]] = nodes
 

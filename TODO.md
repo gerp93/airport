@@ -21,32 +21,32 @@ The phases are ordered by what unblocks what, not by appeal:
 
 Effort: **S** small, **M** moderate, **L** large. ⚠️ = changes game balance.
 
-## Phase 0 — Housekeeping and cheap UI wins
+## Phase 0 — Housekeeping and cheap UI wins  (DONE)
 
-- [ ] Delete `Iso3D.gd` / `Iso3D.tscn`. The look-test spike served its purpose
+- [x] Delete `Iso3D.gd` / `Iso3D.tscn`. The look-test spike served its purpose
       when the port landed; it is dead code now. **S**
-- [ ] Unify "Gate" vs "Stand". Code and log say `Gate 3`, the UI says `Stand S`
+- [x] Unify "Gate" vs "Stand". Code and log say `Gate 3`, the UI says `Stand S`
       and `Stands:`. *Stand* is the accurate term (a marked parking position);
       *tarmac* is a mass noun and cannot be counted, *apron* is the whole area.
       Pick one and make the log, HUD, buttons and `gates` array agree. **S**
-- [ ] Confirmation dialog for large purchases. One misclick with Buy Land spends
+- [x] Confirmation dialog for large purchases. One misclick with Buy Land spends
       $9.7M with no undo. **S**
-- [ ] Colour-code the flight log by severity. `DIVERTED`, `TURNED AWAY` and
+- [x] Colour-code the flight log by severity. `DIVERTED`, `TURNED AWAY` and
       emergencies currently scroll past looking identical to routine arrivals.
       `bbcode_enabled` is off on `LogLabel` today. **S**
-- [ ] Facility tooltips. The ops panel shows costs but never says what a Ground
+- [x] Facility tooltips. The ops panel shows costs but never says what a Ground
       Crew Team actually gates. **S**
-- [ ] Help / shortcuts overlay. Tool keys are undiscoverable; the camera hint is
+- [x] Help / shortcuts overlay. Tool keys are undiscoverable; the camera hint is
       the only affordance on screen. **S**
 
-## Phase 1 — Technical debt, before more content
+## Phase 1 — Technical debt, before more content  (DONE)
 
-- [ ] **`MultiMesh` + incremental rebuild.** Two problems, one fix: one
-      `MeshInstance3D` per tile, and a full teardown of every static node on each
-      placement. Batch by tile type and rebuild only the affected cells. This is
-      the debt the 3D port introduced and it should be paid before Phase 4. **M**
-- [ ] Multiple save slots. One fixed save file today, which makes A/B testing a
-      balance change awkward — and Phase 3 will need exactly that. **S**
+- [x] **`MultiMesh` + incremental rebuild.** Done: rebuilds split into three
+      tiers (session-static scenery, ownership-gated ground, layout) and per-tile
+      geometry batched into `MultiMesh`. Measured on the heaviest terrain:
+      6.5ms -> 0.34ms per placement, 9246 -> 294 nodes.
+- [x] Multiple save slots. Done: three slots with a picker, F5/F9 quick
+      save/load against the last-used slot.
 
 ## Phase 2 — Make the existing simulation legible
 
@@ -70,6 +70,10 @@ Ordered cheap-knob-first, so each can be judged before the next lands.
 
 - [ ] Land holding cost ⚠️. Buying tracts is pure upside once affordable; a small
       per-tile upkeep makes *when* you expand a decision. **S**
+- [ ] Land holding cost is still open; demolition now COSTS a flat
+      `COST_DEMOLISH_TILE` per tile instead of refunding, and purchases made
+      during a pause can be undone in full until time resumes. Both want a play
+      session to judge. ⚠️
 - [ ] Fix the starter layout's road ⚠️. Only one of three concourse tiles touches
       the access road, so two-thirds of the building handles nobody. Fixing it
       roughly triples starting passenger capacity — a real balance change, which
