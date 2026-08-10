@@ -668,9 +668,11 @@ func seed_starter_airport() -> void:
 	for y in [8, 9]:
 		place_taxiway(Vector2i(8, y))
 		place_taxiway(Vector2i(20, y))
-	for x in [10, 13, 16]:
+	# Three stands side by side sharing ONE concourse. Spacing them out gave each
+	# stand its own detached one-tile building, which read as three terminals.
+	# Same tile counts as before, so the opening economy is unchanged.
+	for x in [11, 12, 13]:
 		place_gate(gate_cells_for(Vector2i(x, 6), 1), 1)
-		# Concourse behind each stand, so they start as contact stands.
 		place_terminal(Vector2i(x, 5))
 
 	# Access road out to the northern boundary, plus a small car park. Without

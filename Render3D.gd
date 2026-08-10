@@ -69,7 +69,16 @@ const H_GHOST := 3.0
 # tweaks through the renderer.
 const MODEL_LENGTH := 65.8
 const PLANE_LENGTH_PX := 21.0
+
 const PLANE_SCALE_FUDGE := 2.0
+
+# Airside/landside width hierarchy: runway > taxiway > road. Real proportions
+# are roughly 45m / 23m / 7m, and a full-tile road read as wide as a taxiway,
+# which made the landside look like more apron. A taxiway is locked to exactly
+# one tile by the grid, so it is the fixed middle of the ratio and the other two
+# move around it.
+const RUNWAY_WIDTH_TILES := 1.2
+const ROAD_WIDTH_TILES := 0.34
 
 var grid
 
@@ -306,6 +315,7 @@ func _rebuild_static() -> void:
 
 	_build_ground()
 	_build_tiles()
+	_build_terminals()
 	_build_runways()
 	_build_gates()
 
@@ -331,10 +341,7 @@ func _build_tiles() -> void:
 				_slab(_static_root, Vector3(t, H_PAVEMENT, t), w3(centre, H_PAVEMENT * 0.5),
 					_mat("taxi", COL_TAXIWAY))
 			AirportGrid.TileType.ROAD:
-				_slab(_static_root, Vector3(t, H_PAVEMENT, t), w3(centre, H_PAVEMENT * 0.5),
-					_mat("road", COL_ROAD))
-				_slab(_static_root, Vector3(2.0, 0.6, t * 0.34), w3(centre, H_MARKING),
-					_mat("roadmark", Color(0.85, 0.8, 0.4)))
+				_build_road_tile(cell, centre)
 			AirportGrid.TileType.PARKING:
 				_slab(_static_root, Vector3(t, H_PAVEMENT, t), w3(centre, H_PAVEMENT * 0.5),
 					_mat("park", COL_PARKING))
@@ -344,12 +351,76 @@ func _build_tiles() -> void:
 						w3(centre + Vector2(off, 0.0), H_MARKING),
 						_mat("baymark", Color(0.75, 0.75, 0.8)))
 			AirportGrid.TileType.TERMINAL:
-				# The whole reason to go isometric: a concourse stops being a
-				# flat purple square and becomes a massed volume with a roofline.
-				_slab(_static_root, Vector3(t, H_TERMINAL, t), w3(centre, H_TERMINAL * 0.5),
-					_mat("term", COL_TERMINAL))
-				_slab(_static_root, Vector3(t * 0.92, H_KERB, t * 0.92),
-					w3(centre, H_TERMINAL + H_KERB * 0.5), _mat("termedge", COL_TERMINAL_EDGE))
+				pass  # Merged into runs below, so a concourse reads as one building.
+
+
+# A road is a narrow ribbon rather than a full tile of tarmac, so landside stops
+# reading as more apron. Because it is that much narrower than its own tile, it
+# has to be built as a junction patch plus an arm toward each neighbour — a
+# single centred quad would leave gaps at every corner and T-junction.
+func _build_road_tile(cell: Vector2i, centre: Vector2) -> void:
+	var t: float = AirportGrid.TILE
+	var w: float = t * ROAD_WIDTH_TILES
+	var mat := _mat("road", COL_ROAD)
+	var mark := _mat("roadmark", Color(0.85, 0.8, 0.4))
+
+	_slab(_static_root, Vector3(w, H_PAVEMENT, w), w3(centre, H_PAVEMENT * 0.5), mat)
+
+	for d in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var n: Vector2i = cell + d
+		var connects: bool = grid.tile_type(n) == AirportGrid.TileType.ROAD
+		# Run out to the map edge as well: that is the airport entrance, and
+		# stopping half a tile short would leave it hanging in the grass.
+		if not connects and not grid.in_bounds(n):
+			connects = true
+		if not connects:
+			continue
+
+		var v := Vector2(d)
+		var arm: Vector2 = centre + v * (t * 0.25)
+		var size := Vector3(w, H_PAVEMENT, t * 0.5)
+		if absf(v.x) > 0.0:
+			size = Vector3(t * 0.5, H_PAVEMENT, w)
+		_slab(_static_root, size, w3(arm, H_PAVEMENT * 0.5), mat)
+
+		var dash := Vector3(w * 0.34, 0.6, 1.6) if absf(v.x) > 0.0 else Vector3(1.6, 0.6, w * 0.34)
+		_slab(_static_root, dash, w3(centre + v * (t * 0.3), H_MARKING), mark)
+
+
+# A concourse is one building, not a row of huts. Adjacent TERMINAL tiles are
+# merged into horizontal runs and emitted as a single box, and the roof spans the
+# full run at full tile width so neighbouring rows fuse into one mass instead of
+# showing a seam between per-tile caps.
+func _build_terminals() -> void:
+	var cells: Array = []
+	for c in grid.tiles:
+		if grid.tile_type(c) == AirportGrid.TileType.TERMINAL:
+			cells.append(c)
+	if cells.is_empty():
+		return
+
+	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		if a.y != b.y:
+			return a.y < b.y
+		return a.x < b.x)
+
+	var t: float = AirportGrid.TILE
+	var i := 0
+	while i < cells.size():
+		var start: Vector2i = cells[i]
+		var run := 1
+		while i + run < cells.size() \
+				and cells[i + run].y == start.y \
+				and cells[i + run].x == start.x + run:
+			run += 1
+
+		var centre: Vector2 = grid.cell_to_world(start) + Vector2((float(run) - 1.0) * t * 0.5, 0.0)
+		var width: float = float(run) * t
+		_slab(_static_root, Vector3(width, H_TERMINAL, t), w3(centre, H_TERMINAL * 0.5),
+			_mat("term", COL_TERMINAL))
+		_slab(_static_root, Vector3(width, H_KERB, t), w3(centre, H_TERMINAL + H_KERB * 0.5),
+			_mat("termedge", COL_TERMINAL_EDGE))
+		i += run
 
 
 func _build_runways() -> void:
@@ -366,7 +437,7 @@ func _build_runways() -> void:
 		# no eight-compass-point restriction — the reason 3D suits this game
 		# better than isometric sprites, which need one sprite per heading.
 		var yaw := -axis.angle()
-		_slab(_static_root, Vector3(length, H_PAVEMENT, t * 0.84),
+		_slab(_static_root, Vector3(length, H_PAVEMENT, t * RUNWAY_WIDTH_TILES),
 			w3((ea + eb) * 0.5, H_PAVEMENT * 0.5), _mat("rwy", COL_RUNWAY), yaw)
 
 		var usable: bool = grid.runway_is_usable(r)
