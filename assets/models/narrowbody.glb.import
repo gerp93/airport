@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://dsoe16q7vv8re"
-path="res://.godot/imported/widebody-airliner.glb-cee943581f0ce1f1ca4a6d4294c5868d.scn"
+uid="uid://byio2qwn8tfef"
+path="res://.godot/imported/narrowbody.glb-27f625c3b35a5c7b2d4386973e739b50.scn"
 
 [deps]
 
-source_file="res://assets/models/widebody-airliner.glb"
-dest_files=["res://.godot/imported/widebody-airliner.glb-cee943581f0ce1f1ca4a6d4294c5868d.scn"]
+source_file="res://assets/models/narrowbody.glb"
+dest_files=["res://.godot/imported/narrowbody.glb-27f625c3b35a5c7b2d4386973e739b50.scn"]
 
 [params]
 
