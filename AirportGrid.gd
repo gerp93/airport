@@ -2,10 +2,28 @@ extends RefCounted
 
 enum TileType { EMPTY, TAXIWAY, RUNWAY, GATE, TERMINAL, ROAD, PARKING }
 
-const COLS := 32
-const ROWS := 18
+# The grid is the whole world the airport could ever occupy. Only START_TRACT is
+# owned at the outset, and it is deliberately identical to the old fixed 32x18
+# playfield at the same coordinates — so the starter layout, the road that must
+# reach the map edge, and the entire opening economy are unchanged by expansion
+# existing. Land is bought outward from there.
+const COLS := 44
+const ROWS := 26
 const TILE := 32.0
 const ORIGIN := Vector2(0.0, 96.0)
+
+const START_TRACT := Rect2i(0, 0, 32, 18)
+
+# Buyable parcels, tiling exactly the remainder of the grid. Kept as whole
+# rectangles rather than per-tile purchase: buying a coherent parcel is a real
+# decision, whereas buying single tiles is just tedium.
+const TRACTS := [
+	Rect2i(32, 0, 12, 9),
+	Rect2i(32, 9, 12, 9),
+	Rect2i(0, 18, 16, 8),
+	Rect2i(16, 18, 16, 8),
+	Rect2i(32, 18, 12, 8),
+]
 const MIN_RUNWAY_LEN := 6
 const RUNWAY_WEIGHT := 8.0
 const NOWHERE := Vector2i(-1, -1)
@@ -14,6 +32,9 @@ var tiles := {}
 var claims := {}
 var runways: Array = []
 var gates: Array = []
+# Indices into TRACTS that have been bought. START_TRACT is always owned and is
+# not in this set.
+var owned_tracts := {}
 
 var _astar := AStarGrid2D.new()
 var _runway_seq := 0
@@ -54,6 +75,60 @@ func grid_rect() -> Rect2:
 	return Rect2(ORIGIN, Vector2(COLS, ROWS) * TILE)
 
 
+# --- land ownership ---
+
+func is_owned(c: Vector2i) -> bool:
+	if START_TRACT.has_point(c):
+		return true
+	for i in owned_tracts:
+		if (TRACTS[i] as Rect2i).has_point(c):
+			return true
+	return false
+
+
+# Nothing can be built on land the airport does not own. Every can_place_* check
+# funnels through here rather than repeating the pair of tests.
+func is_buildable(c: Vector2i) -> bool:
+	return in_bounds(c) and is_owned(c)
+
+
+# Which buyable tract a cell falls in, or -1 for owned land / out of bounds.
+func tract_at(c: Vector2i) -> int:
+	if not in_bounds(c) or START_TRACT.has_point(c):
+		return -1
+	for i in TRACTS.size():
+		if owned_tracts.has(i):
+			continue
+		if (TRACTS[i] as Rect2i).has_point(c):
+			return i
+	return -1
+
+
+func tract_tiles(i: int) -> int:
+	var r: Rect2i = TRACTS[i]
+	return r.size.x * r.size.y
+
+
+func buy_tract(i: int) -> void:
+	owned_tracts[i] = true
+	_landside_dirty = true
+
+
+# Bounding box of everything owned, in cells. The camera frames this rather than
+# the whole grid, so buying land widens the view instead of the player starting
+# zoomed out over land they do not own.
+func owned_bounds() -> Rect2i:
+	var r := START_TRACT
+	for i in owned_tracts:
+		r = r.merge(TRACTS[i])
+	return r
+
+
+func owned_rect() -> Rect2:
+	var b := owned_bounds()
+	return Rect2(ORIGIN + Vector2(b.position) * TILE, Vector2(b.size) * TILE)
+
+
 func neighbors(c: Vector2i) -> Array:
 	var out := []
 	for d in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
@@ -87,7 +162,7 @@ func _refresh_cell(c: Vector2i) -> void:
 # --- placement ---
 
 func can_place_taxiway(c: Vector2i) -> bool:
-	return in_bounds(c) and tile_type(c) == TileType.EMPTY
+	return is_buildable(c) and tile_type(c) == TileType.EMPTY
 
 
 func place_taxiway(c: Vector2i) -> void:
@@ -96,7 +171,7 @@ func place_taxiway(c: Vector2i) -> void:
 
 
 func can_place_terminal(c: Vector2i) -> bool:
-	return in_bounds(c) and tile_type(c) == TileType.EMPTY
+	return is_buildable(c) and tile_type(c) == TileType.EMPTY
 
 
 func place_terminal(c: Vector2i) -> void:
@@ -104,10 +179,22 @@ func place_terminal(c: Vector2i) -> void:
 	_refresh_cell(c)
 
 
+# A road leaves the property when it touches land the airport does not own, or
+# runs off the map entirely. Before land could be bought that was simply "the
+# map edge"; the grid is now larger than the airport, so the test has to be
+# against the edge of *owned* land instead.
+func _touches_outside(c: Vector2i) -> bool:
+	for d in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var n: Vector2i = c + d
+		if not in_bounds(n) or not is_owned(n):
+			return true
+	return false
+
+
 # Roads carry passengers in from outside, so the network only counts if it
-# reaches the map edge. Flood from every road tile on the boundary; a concourse
-# or car park is live only if it touches that network. An airport with no road
-# access handles nobody, however much terminal it has built.
+# reaches the boundary. Flood from every road tile on it; a concourse or car
+# park is live only if it touches that network. An airport with no road access
+# handles nobody, however much terminal it has built.
 func landside_roads() -> Dictionary:
 	if not _landside_dirty:
 		return _landside_cache
@@ -116,7 +203,7 @@ func landside_roads() -> Dictionary:
 	for c in tiles:
 		if tiles[c]["type"] != TileType.ROAD:
 			continue
-		if c.x == 0 or c.y == 0 or c.x == COLS - 1 or c.y == ROWS - 1:
+		if _touches_outside(c):
 			reached[c] = true
 			queue.append(c)
 	while not queue.is_empty():
@@ -151,7 +238,7 @@ func count_tiles(type: int, road_served_only: bool) -> int:
 
 
 func can_place_road(c: Vector2i) -> bool:
-	return in_bounds(c) and tile_type(c) == TileType.EMPTY
+	return is_buildable(c) and tile_type(c) == TileType.EMPTY
 
 
 func place_road(c: Vector2i) -> void:
@@ -160,7 +247,7 @@ func place_road(c: Vector2i) -> void:
 
 
 func can_place_parking(c: Vector2i) -> bool:
-	return in_bounds(c) and tile_type(c) == TileType.EMPTY
+	return is_buildable(c) and tile_type(c) == TileType.EMPTY
 
 
 func place_parking(c: Vector2i) -> void:
@@ -317,7 +404,7 @@ func gate_cells_for(anchor: Vector2i, size: int) -> Array:
 
 func can_place_gate(cells: Array) -> bool:
 	for c in cells:
-		if not in_bounds(c) or tile_type(c) != TileType.EMPTY:
+		if not is_buildable(c) or tile_type(c) != TileType.EMPTY:
 			return false
 	return not cells.is_empty()
 
@@ -679,6 +766,7 @@ func to_dict() -> Dictionary:
 		"gates": gates.duplicate(true),
 		"runway_seq": _runway_seq,
 		"gate_seq": _gate_seq,
+		"owned_tracts": owned_tracts.keys(),
 	}
 
 
@@ -688,6 +776,10 @@ func from_dict(d: Dictionary) -> void:
 	gates = d["gates"]
 	_runway_seq = d["runway_seq"]
 	_gate_seq = d["gate_seq"]
+
+	owned_tracts.clear()
+	for i in d.get("owned_tracts", []):
+		owned_tracts[int(i)] = true
 
 	claims.clear()
 	for r in runways:

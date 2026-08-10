@@ -67,6 +67,27 @@ AIR_HOLD -> APPROACH -> INBOUND -> LANDING -> SEEK_GATE -> (HOLDING)
          -> REMOVE
 ```
 
+### The grid is larger than the airport
+
+`AirportGrid` covers 44x26 cells, but only `START_TRACT` — the original fixed
+32x18 playfield, at the same coordinates — is owned at the start. The rest is
+divided into `TRACTS` the player buys with the Buy Land tool.
+
+That coordinate choice is load-bearing: keeping `START_TRACT` identical to the
+old playfield means the starter layout, the road that has to reach the boundary,
+and the whole opening economy are unchanged by expansion existing.
+
+- **Every `can_place_*` goes through `is_buildable()`**, which is `in_bounds()`
+  *and* `is_owned()`. New placement code must not check `in_bounds()` alone.
+- **Landside is measured against owned land, not the map edge.** A road counts
+  as reaching the outside world when it touches an unowned cell or runs off the
+  grid. Buying the tract a road used to exit through can therefore strand it —
+  the "concourse unroaded" warning is the signal.
+- The camera frames `owned_rect()`, so buying land widens the view rather than
+  the game opening zoomed out over land nobody owns.
+- Terrain features scatter outside `grid_rect()` — the whole 44x26 world — so
+  they can never spawn on a buyable tract and block an expansion.
+
 ### Two things that will bite you
 
 **Runways are not tiles.** They are free-angle segments defined by two

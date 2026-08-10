@@ -7,18 +7,20 @@ const Render3D = preload("res://Render3D.gd")
 
 const UPDATE_REPO := "gerp93/airport"
 
-enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, TERMINAL, ROAD, PARKING, DEMOLISH }
+enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, TERMINAL, ROAD, PARKING, DEMOLISH, LAND }
 
 const TOOL_BUTTONS := {
 	Tool.SELECT: "SelectBtn", Tool.TAXIWAY: "TaxiwayBtn", Tool.RUNWAY: "RunwayBtn",
 	Tool.GATE_SMALL: "GateSmallBtn", Tool.GATE_LARGE: "GateLargeBtn",
 	Tool.TERMINAL: "TerminalBtn", Tool.ROAD: "RoadBtn",
 	Tool.PARKING: "ParkingBtn", Tool.DEMOLISH: "DemolishBtn",
+	Tool.LAND: "LandBtn",
 }
 const TOOL_KEYS := {
 	KEY_ESCAPE: Tool.SELECT, KEY_T: Tool.TAXIWAY, KEY_R: Tool.RUNWAY,
 	KEY_G: Tool.GATE_SMALL, KEY_H: Tool.GATE_LARGE, KEY_E: Tool.TERMINAL,
 	KEY_O: Tool.ROAD, KEY_P: Tool.PARKING, KEY_X: Tool.DEMOLISH,
+	KEY_L: Tool.LAND,
 }
 
 const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
@@ -112,6 +114,11 @@ const COST_TERMINAL_TILE := 18_000_000
 const UPKEEP_TERMINAL_TILE := 6_000
 const TERM_UNITS_PER_TILE := 3
 # Landside: passengers arrive by road and have to leave their cars somewhere.
+# Raw land, priced per tile so a bigger parcel costs more. Cheap against what
+# gets built on it — the gate is that a tract is a lump sum you commit up front,
+# not that the dirt itself is expensive.
+const COST_LAND_TILE := 90_000
+
 const COST_ROAD_TILE := 400_000
 const UPKEEP_ROAD_TILE := 200
 const COST_PARKING_TILE := 6_000_000
@@ -260,6 +267,7 @@ func _ready() -> void:
 	$UI/RoadBtn.pressed.connect(_set_tool.bind(Tool.ROAD))
 	$UI/ParkingBtn.pressed.connect(_set_tool.bind(Tool.PARKING))
 	$UI/DemolishBtn.pressed.connect(_set_tool.bind(Tool.DEMOLISH))
+	$UI/LandBtn.pressed.connect(_set_tool.bind(Tool.LAND))
 
 	$UI/PauseBtn.toggled.connect(_on_pause_toggled)
 	$UI/Speed1Btn.pressed.connect(_set_speed.bind(1.0))
@@ -1567,6 +1575,22 @@ func apply_tool_at(cell: Vector2i) -> void:
 			if not grid.is_road_served(cell):
 				add_log("Car park built but has no road to it — handles nobody yet.")
 
+		Tool.LAND:
+			var tract := grid.tract_at(cell)
+			if tract < 0:
+				add_log("That land is already yours.")
+				return
+			var land_cost := grid.tract_tiles(tract) * COST_LAND_TILE
+			if money < land_cost:
+				add_log("Not enough cash for that tract (%s)." % money_str(land_cost))
+				return
+			money -= land_cost
+			grid.buy_tract(tract)
+			var tr: Rect2i = AirportGrid.TRACTS[tract]
+			add_log("Bought %d x %d tract for %s — %d tiles of new land." % [
+				tr.size.x, tr.size.y, money_str(land_cost), grid.tract_tiles(tract),
+			])
+
 		Tool.DEMOLISH:
 			var preview := grid.demolish_preview(cell)
 			if preview.is_empty():
@@ -2180,6 +2204,17 @@ func _update_hud() -> void:
 		Tool.DEMOLISH:
 			hint_label.text = "DEMOLISH — click to remove.\nOccupied gates and runways can't be removed."
 			tool_info_label.text = "Refunds %d%%" % int(REFUND_RATE * 100)
+		Tool.LAND:
+			hint_label.text = "BUY LAND — click a marked tract to buy it.\nNothing can be built on land you don't own."
+			var hovered := grid.tract_at(hover_cell)
+			if hovered >= 0:
+				var tr: Rect2i = AirportGrid.TRACTS[hovered]
+				tool_info_label.text = "%d x %d tract · %s" % [
+					tr.size.x, tr.size.y,
+					money_str(grid.tract_tiles(hovered) * COST_LAND_TILE),
+				]
+			else:
+				tool_info_label.text = "%s per tile" % money_str(COST_LAND_TILE)
 
 
 # --- rendering ---
@@ -2260,6 +2295,16 @@ func _sync_ghost() -> void:
 		render3d.clear_ghost()
 		return
 
+	if tool == Tool.LAND:
+		var tract := grid.tract_at(hover_cell)
+		if tract < 0:
+			render3d.clear_ghost()
+			return
+		var land_cost := grid.tract_tiles(tract) * COST_LAND_TILE
+		render3d.set_ghost_rect(AirportGrid.TRACTS[tract],
+			Color(0.45, 0.9, 1.0, 0.28) if money >= land_cost else Color(0.95, 0.35, 0.35, 0.28))
+		return
+
 	if tool == Tool.RUNWAY:
 		if not is_dragging or not grid.in_bounds(drag_start):
 			render3d.clear_ghost()
@@ -2324,17 +2369,26 @@ func _draw() -> void:
 # drawing screen-aligned lines means it lands exactly on the 3D ground plane and
 # stays correct through every camera rotation.
 func _draw_grid_overlay() -> void:
+	# Drawn per owned tract rather than across the whole grid: gridding land the
+	# player does not own would imply they can build on it.
+	_grid_lines_for(AirportGrid.START_TRACT)
+	for i in AirportGrid.TRACTS.size():
+		if grid.owned_tracts.has(i):
+			_grid_lines_for(AirportGrid.TRACTS[i])
+
+
+func _grid_lines_for(b: Rect2i) -> void:
 	var line_color := Color(1, 1, 1, 0.05)
-	var o := AirportGrid.ORIGIN
 	var t: float = AirportGrid.TILE
-	var w: float = AirportGrid.COLS * t
-	var h: float = AirportGrid.ROWS * t
-	for x in range(AirportGrid.COLS + 1):
-		var px: float = o.x + x * t
+	var o: Vector2 = AirportGrid.ORIGIN + Vector2(b.position) * t
+	var w: float = float(b.size.x) * t
+	var h: float = float(b.size.y) * t
+	for x in range(b.size.x + 1):
+		var px: float = o.x + float(x) * t
 		draw_line(render3d.world_to_screen(Vector2(px, o.y)),
 			render3d.world_to_screen(Vector2(px, o.y + h)), line_color, 1.0)
-	for y in range(AirportGrid.ROWS + 1):
-		var py: float = o.y + y * t
+	for y in range(b.size.y + 1):
+		var py: float = o.y + float(y) * t
 		draw_line(render3d.world_to_screen(Vector2(o.x, py)),
 			render3d.world_to_screen(Vector2(o.x + w, py)), line_color, 1.0)
 

@@ -237,7 +237,9 @@ func _visible_rect() -> Rect2:
 func _default_size() -> float:
 	if grid == null:
 		return 700.0
-	var b: Rect2 = grid.grid_rect()
+	# Owned land, not the whole grid: otherwise the game opens zoomed out over
+	# tracts the player does not own yet.
+	var b: Rect2 = grid.owned_rect()
 	# An iso-projected W x D rect spans (W+D)*cos45 horizontally and that same
 	# span times sin(pitch) vertically.
 	var span: float = b.size.x + b.size.y
@@ -256,7 +258,7 @@ func _default_size() -> float:
 func _apply_camera() -> void:
 	var centre := Vector2.ZERO
 	if grid != null:
-		var b: Rect2 = grid.grid_rect()
+		var b: Rect2 = grid.owned_rect()
 		centre = b.position + b.size * 0.5
 	_yaw_node.position = w3(centre + _pan, 0.0)
 	_yaw_node.rotation_degrees = Vector3(0.0, _yaw_deg, 0.0)
@@ -312,6 +314,10 @@ func rebuild_if_dirty() -> void:
 		return
 	_layout_dirty = false
 	_rebuild_static()
+	# Buying land widens the owned area, so the framing has to be recomputed.
+	# Harmless on every other layout change: the size only moves when the owned
+	# bounds actually move, and pan/zoom are preserved.
+	_apply_camera()
 
 
 func _rebuild_static() -> void:
@@ -347,11 +353,30 @@ func _build_ground() -> void:
 	_slab(_static_root, Vector3(r.size.x * 4.0, 2.0, r.size.y * 4.0),
 		w3(r.position + r.size * 0.5, -2.0),
 		_mat("skirt", _terrain_color("surround", COL_OUTSIDE)))
-	_slab(_static_root, Vector3(r.size.x, 2.0, r.size.y),
-		w3(r.position + r.size * 0.5, 0.0),
-		_mat("field", _terrain_color("field", COL_FIELD)))
+	# Owned land is drawn as the airport's own ground; buyable tracts are drawn
+	# darker and a touch lower, so the boundary of the property is legible
+	# without needing an overlay.
+	var field := _terrain_color("field", COL_FIELD)
+	var field_mat := _mat("field", field)
+	var raw_mat := _mat("rawland", field.darkened(0.34).lerp(Color(0.28, 0.26, 0.20), 0.25))
+
+	_tract_slab(AirportGrid.START_TRACT, field_mat, 0.0)
+	for i in AirportGrid.TRACTS.size():
+		var tr: Rect2i = AirportGrid.TRACTS[i]
+		if grid.owned_tracts.has(i):
+			_tract_slab(tr, field_mat, 0.0)
+		else:
+			_tract_slab(tr, raw_mat, -0.7)
+
 	_build_terrain_features()
 	_build_compass()
+
+
+func _tract_slab(r: Rect2i, mat: Material, y: float) -> void:
+	var t: float = AirportGrid.TILE
+	var pos: Vector2 = AirportGrid.ORIGIN + Vector2(r.position) * t
+	var size: Vector2 = Vector2(r.size) * t
+	_slab(_static_root, Vector3(size.x, 2.0, size.y), w3(pos + size * 0.5, y), mat)
 
 
 # Scatter whatever the region grows outside the fence. Deterministic from the
@@ -888,6 +913,23 @@ func set_ghost_cells(cells: Array, color: Color) -> void:
 		if not grid.in_bounds(cell):
 			continue
 		_slab(_ghost_root, Vector3(t, H_GHOST, t), w3(grid.cell_to_world(cell), H_GHOST * 0.5), mat)
+
+
+# A whole parcel as one slab. Emitting 100+ per-cell ghosts for a land purchase
+# would be pointless churn every time the cursor moves.
+func set_ghost_rect(r: Rect2i, color: Color) -> void:
+	var sig := "t%s%s" % [color.to_html(false), r]
+	if sig == _ghost_sig:
+		return
+	_ghost_sig = sig
+	for c in _ghost_root.get_children():
+		c.queue_free()
+
+	var t: float = AirportGrid.TILE
+	var pos: Vector2 = AirportGrid.ORIGIN + Vector2(r.position) * t
+	var size: Vector2 = Vector2(r.size) * t
+	_slab(_ghost_root, Vector3(size.x, H_GHOST, size.y),
+		w3(pos + size * 0.5, H_GHOST * 0.5), _mat("ghost_" + color.to_html(true), color, true))
 
 
 func set_ghost_runway(a: Vector2, b: Vector2, color: Color) -> void:
