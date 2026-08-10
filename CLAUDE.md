@@ -61,8 +61,8 @@ material override, not an art pipeline.
 Aircraft state flow:
 
 ```
-AIR_HOLD -> APPROACH -> INBOUND -> LANDING -> SEEK_GATE -> (HOLDING)
-         -> TAXI_TO_GATE -> AWAIT_SERVICE -> AT_GATE -> AWAIT_DEPART
+AIR_HOLD -> APPROACH -> INBOUND -> LANDING -> SEEK_STAND -> (HOLDING)
+         -> TAXI_TO_STAND -> AWAIT_SERVICE -> AT_STAND -> AWAIT_DEPART
          -> TAXI_OUT -> HOLD_SHORT -> LINE_UP -> DEPARTING -> CLIMB_OUT
          -> REMOVE
 ```
@@ -133,7 +133,7 @@ godot --headless --fixed-fps 60 --path . --quit-after 18000 -- --echo-log --auto
 
 Useful signals in the log: `towed off` and `gridlocked` mean the traffic
 reservation system deadlocked; `TURNED AWAY` means scheduled volume exceeded
-capacity; `stuck at Gate` names whichever ground resource is short.
+capacity; `stuck at Stand` names whichever ground resource is short.
 
 The balance run never picks up a build tool, because it has no cursor. Tool
 hover/drag code — the HUD readouts, the ghost preview, the renderer's ghost —

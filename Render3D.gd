@@ -44,9 +44,9 @@ const COL_TERMINAL_EDGE := Color(0.62, 0.58, 0.78)
 const COL_ROAD := Color(0.24, 0.24, 0.26)
 const COL_PARKING := Color(0.30, 0.31, 0.33)
 const COL_RUNWAY := Color(0.28, 0.28, 0.30)
-const COL_GATE_FREE := Color(0.18, 0.42, 0.18)
-const COL_GATE_BUSY := Color(0.75, 0.32, 0.25)
-const COL_GATE_ORPHAN := Color(0.45, 0.35, 0.15)
+const COL_STAND_FREE := Color(0.18, 0.42, 0.18)
+const COL_STAND_BUSY := Color(0.75, 0.32, 0.25)
+const COL_STAND_ORPHAN := Color(0.45, 0.35, 0.15)
 const COL_MARKING := Color(0.87, 0.87, 0.87)
 
 # --- heights ----------------------------------------------------------------
@@ -54,7 +54,7 @@ const COL_MARKING := Color(0.87, 0.87, 0.87)
 # epsilon nudge. Units match the 2D game exactly (1 unit = 1px, TILE = 32).
 
 const H_PAVEMENT := 1.2
-const H_GATE := 1.6
+const H_STAND := 1.6
 const H_MARKING := 2.0
 const H_TERMINAL := 20.0
 const H_KERB := 2.4
@@ -92,7 +92,7 @@ var _plane_root: Node3D
 var _ghost_root: Node3D
 
 var _plane_nodes := {}
-var _gate_nodes := {}
+var _stand_nodes := {}
 var _mats := {}
 var _livery_cache := {}
 
@@ -323,13 +323,13 @@ func rebuild_if_dirty() -> void:
 func _rebuild_static() -> void:
 	for c in _static_root.get_children():
 		c.queue_free()
-	_gate_nodes.clear()
+	_stand_nodes.clear()
 
 	_build_ground()
 	_build_tiles()
 	_build_terminals()
 	_build_runways()
-	_build_gates()
+	_build_stands()
 
 
 # Terrain is cosmetic and arrives only once the player picks a region, which is
@@ -668,32 +668,32 @@ func _paint_designator(text: String, at: Vector2, facing: Vector2) -> void:
 	_static_root.add_child(l)
 
 
-func _build_gates() -> void:
+func _build_stands() -> void:
 	var t: float = AirportGrid.TILE
-	for g in grid.gates:
+	for g in grid.stands:
 		var nodes: Array = []
 		for c in g["cells"]:
-			nodes.append(_slab(_static_root, Vector3(t * 0.96, H_GATE, t * 0.96),
-				w3(grid.cell_to_world(c), H_GATE * 0.5), _mat("gatefree", COL_GATE_FREE)))
-		_gate_nodes[g["id"]] = nodes
+			nodes.append(_slab(_static_root, Vector3(t * 0.96, H_STAND, t * 0.96),
+				w3(grid.cell_to_world(c), H_STAND * 0.5), _mat("standfree", COL_STAND_FREE)))
+		_stand_nodes[g["id"]] = nodes
 
 
 # Stand occupancy flips constantly while the layout does not, so colour is
 # refreshed per frame rather than triggering a full static rebuild.
-func sync_gates() -> void:
+func sync_stands() -> void:
 	if grid == null:
 		return
-	for g in grid.gates:
-		if not _gate_nodes.has(g["id"]):
+	for g in grid.stands:
+		if not _stand_nodes.has(g["id"]):
 			continue
 		var mat: Material
-		if not grid.gate_is_connected(g):
-			mat = _mat("gateorphan", COL_GATE_ORPHAN)
+		if not grid.stand_is_connected(g):
+			mat = _mat("standorphan", COL_STAND_ORPHAN)
 		elif g["occupied"]:
-			mat = _mat("gatebusy", COL_GATE_BUSY)
+			mat = _mat("standbusy", COL_STAND_BUSY)
 		else:
-			mat = _mat("gatefree", COL_GATE_FREE)
-		for mi in _gate_nodes[g["id"]]:
+			mat = _mat("standfree", COL_STAND_FREE)
+		for mi in _stand_nodes[g["id"]]:
 			(mi as MeshInstance3D).material_override = mat
 
 

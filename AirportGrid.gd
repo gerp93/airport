@@ -1,6 +1,8 @@
 extends RefCounted
 
-enum TileType { EMPTY, TAXIWAY, RUNWAY, GATE, TERMINAL, ROAD, PARKING }
+# NB: the ORDINAL is what gets serialized inside saved "tiles", so members may be
+# renamed but must never be reordered.
+enum TileType { EMPTY, TAXIWAY, RUNWAY, STAND, TERMINAL, ROAD, PARKING }
 
 # The grid is the whole world the airport could ever occupy. Only START_TRACT is
 # owned at the outset, and it is deliberately identical to the old fixed 32x18
@@ -31,7 +33,7 @@ const NOWHERE := Vector2i(-1, -1)
 var tiles := {}
 var claims := {}
 var runways: Array = []
-var gates: Array = []
+var stands: Array = []
 # Indices into TRACTS that have been bought. START_TRACT is always owned and is
 # not in this set.
 var owned_tracts := {}
@@ -40,7 +42,7 @@ var _astar := AStarGrid2D.new()
 var _runway_seq := 0
 var _landside_dirty := true
 var _landside_cache := {}
-var _gate_seq := 0
+var _stand_seq := 0
 
 
 func _init() -> void:
@@ -265,8 +267,8 @@ func terminal_tile_count() -> int:
 
 # A stand touching a terminal is a contact stand — passengers walk a jet bridge.
 # One that isn't still works, but everyone has to be bussed out to it.
-func gate_is_contact(gate: Dictionary) -> bool:
-	for c in gate["cells"]:
+func stand_is_contact(stand: Dictionary) -> bool:
+	for c in stand["cells"]:
 		for n in neighbors(c):
 			if tile_type(n) == TileType.TERMINAL:
 				return true
@@ -393,28 +395,28 @@ func _restamp_runway(r: Dictionary) -> void:
 		_refresh_cell(c)
 
 
-# A gate spans `size` tiles to the right of its anchor: 1 for a small stand,
+# A stand spans `size` tiles to the right of its anchor: 1 for a small stand,
 # 2 for a widebody stand.
-func gate_cells_for(anchor: Vector2i, size: int) -> Array:
+func stand_cells_for(anchor: Vector2i, size: int) -> Array:
 	var cells := []
 	for i in size:
 		cells.append(anchor + Vector2i(i, 0))
 	return cells
 
 
-func can_place_gate(cells: Array) -> bool:
+func can_place_stand(cells: Array) -> bool:
 	for c in cells:
 		if not is_buildable(c) or tile_type(c) != TileType.EMPTY:
 			return false
 	return not cells.is_empty()
 
 
-func place_gate(cells: Array, size: int) -> int:
-	var id := _gate_seq
-	_gate_seq += 1
-	gates.append({"id": id, "cells": cells.duplicate(), "size": size, "occupied": false})
+func place_stand(cells: Array, size: int) -> int:
+	var id := _stand_seq
+	_stand_seq += 1
+	stands.append({"id": id, "cells": cells.duplicate(), "size": size, "occupied": false})
 	for c in cells:
-		tiles[c] = {"type": TileType.GATE, "entity_id": id}
+		tiles[c] = {"type": TileType.STAND, "entity_id": id}
 		_refresh_cell(c)
 	return id
 
@@ -427,10 +429,10 @@ func runway_at(c: Vector2i) -> Variant:
 	return get_runway(tiles[c]["entity_id"])
 
 
-func gate_at(c: Vector2i) -> Variant:
-	if tile_type(c) != TileType.GATE:
+func stand_at(c: Vector2i) -> Variant:
+	if tile_type(c) != TileType.STAND:
 		return null
-	return get_gate(tiles[c]["entity_id"])
+	return get_stand(tiles[c]["entity_id"])
 
 
 func get_runway(id: int) -> Variant:
@@ -440,8 +442,8 @@ func get_runway(id: int) -> Variant:
 	return null
 
 
-func get_gate(id: int) -> Variant:
-	for g in gates:
+func get_stand(id: int) -> Variant:
+	for g in stands:
 		if g["id"] == id:
 			return g
 	return null
@@ -449,12 +451,12 @@ func get_gate(id: int) -> Variant:
 
 # --- usability ---
 
-func gate_is_connected(g: Dictionary) -> bool:
-	return gate_park_cell(g) != NOWHERE
+func stand_is_connected(g: Dictionary) -> bool:
+	return stand_park_cell(g) != NOWHERE
 
 
-# Planes park on whichever of the gate's tiles touches a taxiway.
-func gate_park_cell(g: Dictionary) -> Vector2i:
+# Planes park on whichever of the stand's tiles touches a taxiway.
+func stand_park_cell(g: Dictionary) -> Vector2i:
 	for c in g["cells"]:
 		for n in neighbors(c):
 			if tile_type(n) == TileType.TAXIWAY:
@@ -614,10 +616,10 @@ func runway_is_clear(r: Dictionary, _ignore_plane: int = -1) -> bool:
 	return not r["occupied"] and runway_is_usable(r)
 
 
-func usable_free_gates() -> Array:
+func usable_free_stands() -> Array:
 	var out := []
-	for g in gates:
-		if not g["occupied"] and gate_is_connected(g):
+	for g in stands:
+		if not g["occupied"] and stand_is_connected(g):
 			out.append(g)
 	return out
 
@@ -717,8 +719,8 @@ func demolish_preview(c: Vector2i) -> Dictionary:
 			if claims.has(c):
 				return {}
 			return {"type": t, "tiles": 1, "cells": [c]}
-		TileType.GATE:
-			var g = gate_at(c)
+		TileType.STAND:
+			var g = stand_at(c)
 			if g == null or g["occupied"]:
 				return {}
 			for gc in g["cells"]:
@@ -742,9 +744,9 @@ func demolish(c: Vector2i) -> Dictionary:
 		return {}
 
 	match preview["type"]:
-		TileType.GATE:
-			var g = gate_at(c)
-			gates.erase(g)
+		TileType.STAND:
+			var g = stand_at(c)
+			stands.erase(g)
 		TileType.RUNWAY:
 			var r = runway_at(c)
 			runways.erase(r)
@@ -763,9 +765,9 @@ func to_dict() -> Dictionary:
 	return {
 		"tiles": tiles.duplicate(true),
 		"runways": runways.duplicate(true),
-		"gates": gates.duplicate(true),
+		"stands": stands.duplicate(true),
 		"runway_seq": _runway_seq,
-		"gate_seq": _gate_seq,
+		"stand_seq": _stand_seq,
 		"owned_tracts": owned_tracts.keys(),
 	}
 
@@ -773,9 +775,9 @@ func to_dict() -> Dictionary:
 func from_dict(d: Dictionary) -> void:
 	tiles = d["tiles"]
 	runways = d["runways"]
-	gates = d["gates"]
+	stands = d["stands"]
 	_runway_seq = d["runway_seq"]
-	_gate_seq = d["gate_seq"]
+	_stand_seq = d["stand_seq"]
 
 	owned_tracts.clear()
 	for i in d.get("owned_tracts", []):
@@ -784,7 +786,7 @@ func from_dict(d: Dictionary) -> void:
 	claims.clear()
 	for r in runways:
 		r["occupied"] = false
-	for g in gates:
+	for g in stands:
 		g["occupied"] = false
 	for y in ROWS:
 		for x in COLS:
@@ -810,7 +812,7 @@ func seed_starter_airport() -> void:
 	# stand its own detached one-tile building, which read as three terminals.
 	# Same tile counts as before, so the opening economy is unchanged.
 	for x in [11, 12, 13]:
-		place_gate(gate_cells_for(Vector2i(x, 6), 1), 1)
+		place_stand(stand_cells_for(Vector2i(x, 6), 1), 1)
 		place_terminal(Vector2i(x, 5))
 
 	# Access road out to the northern boundary, plus a small car park. Without

@@ -125,7 +125,7 @@ toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
 text = "Runway"
 
-[node name="GateSmallBtn" type="Button" parent="UI"]
+[node name="StandSmallBtn" type="Button" parent="UI"]
 offset_left = 292.0
 offset_top = 680.0
 offset_right = 380.0
@@ -135,7 +135,7 @@ toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
 text = "Stand S"
 
-[node name="GateLargeBtn" type="Button" parent="UI"]
+[node name="StandLargeBtn" type="Button" parent="UI"]
 offset_left = 386.0
 offset_top = 680.0
 offset_right = 474.0

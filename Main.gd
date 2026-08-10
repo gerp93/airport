@@ -7,18 +7,18 @@ const Render3D = preload("res://Render3D.gd")
 
 const UPDATE_REPO := "gerp93/airport"
 
-enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, TERMINAL, ROAD, PARKING, DEMOLISH, LAND }
+enum Tool { SELECT, TAXIWAY, RUNWAY, STAND_SMALL, STAND_LARGE, TERMINAL, ROAD, PARKING, DEMOLISH, LAND }
 
 const TOOL_BUTTONS := {
 	Tool.SELECT: "SelectBtn", Tool.TAXIWAY: "TaxiwayBtn", Tool.RUNWAY: "RunwayBtn",
-	Tool.GATE_SMALL: "GateSmallBtn", Tool.GATE_LARGE: "GateLargeBtn",
+	Tool.STAND_SMALL: "StandSmallBtn", Tool.STAND_LARGE: "StandLargeBtn",
 	Tool.TERMINAL: "TerminalBtn", Tool.ROAD: "RoadBtn",
 	Tool.PARKING: "ParkingBtn", Tool.DEMOLISH: "DemolishBtn",
 	Tool.LAND: "LandBtn",
 }
 const TOOL_KEYS := {
 	KEY_ESCAPE: Tool.SELECT, KEY_T: Tool.TAXIWAY, KEY_R: Tool.RUNWAY,
-	KEY_G: Tool.GATE_SMALL, KEY_H: Tool.GATE_LARGE, KEY_E: Tool.TERMINAL,
+	KEY_G: Tool.STAND_SMALL, KEY_H: Tool.STAND_LARGE, KEY_E: Tool.TERMINAL,
 	KEY_O: Tool.ROAD, KEY_P: Tool.PARKING, KEY_X: Tool.DEMOLISH,
 	KEY_L: Tool.LAND,
 }
@@ -32,17 +32,17 @@ const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
 # regional jet is both realistic and worth serving.
 const CLASSES := [
 	{
-		"name": "Regional", "code": "R", "min_runway": 6, "gate_size": 1,
+		"name": "Regional", "code": "R", "min_runway": 6, "stand_size": 1,
 		"fee_min": 700, "fee_max": 1_100, "turnaround": 4.0, "scale": 0.7,
 		"term_units": 1,
 	},
 	{
-		"name": "Narrowbody", "code": "N", "min_runway": 12, "gate_size": 1,
+		"name": "Narrowbody", "code": "N", "min_runway": 12, "stand_size": 1,
 		"fee_min": 1_900, "fee_max": 2_900, "turnaround": 8.0, "scale": 1.0,
 		"term_units": 2,
 	},
 	{
-		"name": "Widebody", "code": "W", "min_runway": 18, "gate_size": 2,
+		"name": "Widebody", "code": "W", "min_runway": 18, "stand_size": 2,
 		"fee_min": 6_500, "fee_max": 9_500, "turnaround": 13.0, "scale": 1.35,
 		"term_units": 3,
 	},
@@ -70,7 +70,7 @@ const REVENUE_SCALE := 40
 
 const COST_TAXIWAY := 500_000
 const COST_RUNWAY_TILE := 1_500_000
-const COST_GATE_TILE := 4_500_000
+const COST_STAND_TILE := 4_500_000
 const REFUND_RATE := 0.5
 const TOW_FEE := 25_000
 
@@ -115,7 +115,7 @@ const UPKEEP_TERMINAL_TILE := 6_000
 const TERM_UNITS_PER_TILE := 3
 # Landside: passengers arrive by road and have to leave their cars somewhere.
 # Raw land, priced per tile so a bigger parcel costs more. Cheap against what
-# gets built on it — the gate is that a tract is a lump sum you commit up front,
+# gets built on it — the stand is that a tract is a lump sum you commit up front,
 # not that the dirt itself is expensive.
 const COST_LAND_TILE := 90_000
 
@@ -148,7 +148,10 @@ const REP_PER_TURNAROUND := 2
 const REP_MAX := 100
 
 const SAVE_PATH := "user://airport_save.dat"
-const SAVE_VERSION := 3
+# 4: "gates"/"gate_seq" became "stands"/"stand_seq" in the grid payload. Older
+# saves are rejected rather than migrated — the save-slot paths changed at the
+# same time, so nothing was preserved across that boundary anyway.
+const SAVE_VERSION := 4
 
 const AIRPORT_CODE := "HOME"
 const MAX_ROUTES := 8
@@ -261,8 +264,8 @@ func _ready() -> void:
 	$UI/SelectBtn.pressed.connect(_set_tool.bind(Tool.SELECT))
 	$UI/TaxiwayBtn.pressed.connect(_set_tool.bind(Tool.TAXIWAY))
 	$UI/RunwayBtn.pressed.connect(_set_tool.bind(Tool.RUNWAY))
-	$UI/GateSmallBtn.pressed.connect(_set_tool.bind(Tool.GATE_SMALL))
-	$UI/GateLargeBtn.pressed.connect(_set_tool.bind(Tool.GATE_LARGE))
+	$UI/StandSmallBtn.pressed.connect(_set_tool.bind(Tool.STAND_SMALL))
+	$UI/StandLargeBtn.pressed.connect(_set_tool.bind(Tool.STAND_LARGE))
 	$UI/TerminalBtn.pressed.connect(_set_tool.bind(Tool.TERMINAL))
 	$UI/RoadBtn.pressed.connect(_set_tool.bind(Tool.ROAD))
 	$UI/ParkingBtn.pressed.connect(_set_tool.bind(Tool.PARKING))
@@ -305,7 +308,7 @@ func _ready() -> void:
 		_style_button($UI/FacilityPanel.get_node("Row%dBuy" % i))
 		_style_button($UI/FacilityPanel.get_node("Row%dSell" % i))
 
-	add_log("Airport open. Build taxiways to connect runways and gates.")
+	add_log("Airport open. Build taxiways to connect runways and stands.")
 
 	# Headless/balance runs are deterministic test tooling, not a real play
 	# session — they shouldn't make a network call or depend on GitHub being up.
@@ -556,7 +559,7 @@ func total_upkeep() -> int:
 	total += grid.terminal_tile_count() * UPKEEP_TERMINAL_TILE
 	total += grid.count_tiles(AirportGrid.TileType.ROAD, false) * UPKEEP_ROAD_TILE
 	total += grid.count_tiles(AirportGrid.TileType.PARKING, false) * UPKEEP_PARKING_TILE
-	total += grid.gates.size() * UPKEEP_STAND
+	total += grid.stands.size() * UPKEEP_STAND
 	return total
 
 
@@ -708,8 +711,8 @@ func can_handle_class(size: int) -> bool:
 			break
 	if not runway_ok:
 		return false
-	for g in grid.gates:
-		if grid.gate_is_connected(g) and g["size"] >= int(need["gate_size"]):
+	for g in grid.stands:
+		if grid.stand_is_connected(g) and g["size"] >= int(need["stand_size"]):
 			return true
 	return false
 
@@ -927,7 +930,7 @@ func spawn_flight(airline: String, size: int, origin: Array, rate: float, kind: 
 		"state": "AIR_HOLD",
 		"pos": SPAWN_POS, "heading": 0.0,
 		"cell": AirportGrid.NOWHERE,
-		"runway_id": -1, "gate_id": -1,
+		"runway_id": -1, "stand_id": -1,
 		"path": [], "path_index": 0,
 		"air_hold_timer": 0.0, "max_air_hold": 25.0,
 		"hold_timer": 0.0, "max_hold": 18.0,
@@ -1064,7 +1067,7 @@ func advance_along_path(p: Dictionary, speed: float, dt: float) -> String:
 
 
 func taxi_priority(p: Dictionary) -> int:
-	return 1 if p["state"] == "TAXI_TO_GATE" else 0
+	return 1 if p["state"] == "TAXI_TO_STAND" else 0
 
 
 func yields_to(p: Dictionary, other: Dictionary) -> bool:
@@ -1103,11 +1106,11 @@ func handle_blocked(p: Dictionary, dt: float) -> bool:
 
 func release_plane(p: Dictionary) -> void:
 	grid.release_all(p["id"])
-	if p["gate_id"] != -1:
-		var g = grid.get_gate(p["gate_id"])
+	if p["stand_id"] != -1:
+		var g = grid.get_stand(p["stand_id"])
 		if g != null:
 			g["occupied"] = false
-		p["gate_id"] = -1
+		p["stand_id"] = -1
 	if p["runway_id"] != -1:
 		var r = grid.get_runway(p["runway_id"])
 		if r != null:
@@ -1130,7 +1133,7 @@ func divert(p: Dictionary, reason: String, rep_cost: int) -> void:
 	release_plane(p)
 
 
-# --- gate / runway acquisition ---
+# --- stand / runway acquisition ---
 
 func class_of(p: Dictionary) -> Dictionary:
 	return CLASSES[p["size"]]
@@ -1140,8 +1143,8 @@ func runway_fits(r: Dictionary, p: Dictionary) -> bool:
 	return grid.runway_length_tiles(r) >= required_runway(p)
 
 
-func gate_fits(g: Dictionary, p: Dictionary) -> bool:
-	return g["size"] >= class_of(p)["gate_size"]
+func stand_fits(g: Dictionary, p: Dictionary) -> bool:
+	return g["size"] >= class_of(p)["stand_size"]
 
 
 func any_runway_fits(p: Dictionary) -> bool:
@@ -1151,57 +1154,57 @@ func any_runway_fits(p: Dictionary) -> bool:
 	return false
 
 
-func any_gate_fits(p: Dictionary) -> bool:
-	for g in grid.gates:
-		if grid.gate_is_connected(g) and gate_fits(g, p):
+func any_stand_fits(p: Dictionary) -> bool:
+	for g in grid.stands:
+		if grid.stand_is_connected(g) and stand_fits(g, p):
 			return true
 	return false
 
 
-func compatible_free_gates(p: Dictionary) -> Array:
+func compatible_free_stands(p: Dictionary) -> Array:
 	var out := []
-	for g in grid.usable_free_gates():
-		if gate_fits(g, p):
+	for g in grid.usable_free_stands():
+		if stand_fits(g, p):
 			out.append(g)
 	return out
 
 
-func try_assign_gate(p: Dictionary) -> bool:
+func try_assign_stand(p: Dictionary) -> bool:
 	var best_path: Array = []
-	var best_gate = null
-	for g in compatible_free_gates(p):
-		var path := grid.find_path(p["cell"], grid.gate_park_cell(g))
+	var best_stand = null
+	for g in compatible_free_stands(p):
+		var path := grid.find_path(p["cell"], grid.stand_park_cell(g))
 		if path.is_empty():
 			continue
 		if best_path.is_empty() or path.size() < best_path.size():
 			best_path = path
-			best_gate = g
-	if best_gate == null:
+			best_stand = g
+	if best_stand == null:
 		return false
 
-	best_gate["occupied"] = true
-	p["gate_id"] = best_gate["id"]
+	best_stand["occupied"] = true
+	p["stand_id"] = best_stand["id"]
 	set_path(p, best_path)
-	p["state"] = "TAXI_TO_GATE"
+	p["state"] = "TAXI_TO_STAND"
 	p["state_timer"] = 0.0
-	add_log("%s cleared to Gate %d." % [p["callsign"], best_gate["id"] + 1])
+	add_log("%s cleared to Stand %d." % [p["callsign"], best_stand["id"] + 1])
 	return true
 
 
-func assign_gate_manual(p: Dictionary, gate: Dictionary) -> void:
-	if not gate_fits(gate, p):
-		add_log("Gate %d is too small for a %s." % [gate["id"] + 1, class_of(p)["name"].to_lower()])
+func assign_stand_manual(p: Dictionary, stand: Dictionary) -> void:
+	if not stand_fits(stand, p):
+		add_log("Stand %d is too small for a %s." % [stand["id"] + 1, class_of(p)["name"].to_lower()])
 		return
-	var path := grid.find_path(p["cell"], grid.gate_park_cell(gate))
+	var path := grid.find_path(p["cell"], grid.stand_park_cell(stand))
 	if path.is_empty():
-		add_log("No taxi route from %s to Gate %d." % [p["callsign"], gate["id"] + 1])
+		add_log("No taxi route from %s to Stand %d." % [p["callsign"], stand["id"] + 1])
 		return
-	gate["occupied"] = true
-	p["gate_id"] = gate["id"]
+	stand["occupied"] = true
+	p["stand_id"] = stand["id"]
 	set_path(p, path)
-	p["state"] = "TAXI_TO_GATE"
+	p["state"] = "TAXI_TO_STAND"
 	p["state_timer"] = 0.0
-	add_log("%s assigned to Gate %d." % [p["callsign"], gate["id"] + 1])
+	add_log("%s assigned to Stand %d." % [p["callsign"], stand["id"] + 1])
 
 
 func runway_has_waiting_departure(runway_id: int) -> bool:
@@ -1273,7 +1276,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			var runway = find_arrival_runway(p)
 			# Never clear a landing we can't park — a plane that has already
 			# touched down has nowhere to go, so the stand check belongs here.
-			if runway != null and any_gate_fits(p):
+			if runway != null and any_stand_fits(p):
 				runway["occupied"] = true
 				p["runway_id"] = runway["id"]
 				p["state"] = "APPROACH"
@@ -1286,7 +1289,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 					reason = "no runway long enough for a %s (needs %s)" % [
 						class_of(p)["name"].to_lower(), length_str(class_of(p)["min_runway"]),
 					]
-				elif not any_gate_fits(p):
+				elif not any_stand_fits(p):
 					reason = "no stand big enough for a %s" % class_of(p)["name"].to_lower()
 				divert(p, reason, 15)
 
@@ -1329,21 +1332,21 @@ func update_plane(p: Dictionary, dt: float) -> void:
 					runway["occupied"] = false
 					p["runway_id"] = -1
 					p["blocked_timer"] = 0.0
-					p["state"] = "SEEK_GATE"
+					p["state"] = "SEEK_STAND"
 					p["state_timer"] = 0.0
 				else:
 					p["blocked_timer"] += dt
 					if p["blocked_timer"] >= MAX_BLOCK_TIME:
 						divert(p, "runway exit blocked", 15)
 
-		"SEEK_GATE":
-			if try_assign_gate(p):
+		"SEEK_STAND":
+			if try_assign_stand(p):
 				return
-			if not any_gate_fits(p):
+			if not any_stand_fits(p):
 				# Only reachable if the last compatible stand was demolished
 				# mid-approach; AIR_HOLD screens this case before clearing.
 				divert(p, "its stand was removed on approach", 10)
-			elif compatible_free_gates(p).is_empty():
+			elif compatible_free_stands(p).is_empty():
 				p["state"] = "HOLDING"
 				p["hold_timer"] = 0.0
 				set_path(p, [])
@@ -1353,7 +1356,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 
 		"HOLDING":
 			p["hold_timer"] += dt
-			if try_assign_gate(p):
+			if try_assign_stand(p):
 				return
 			if p["path_index"] < p["path"].size():
 				advance_along_path(p, taxi_speed(), dt)
@@ -1364,9 +1367,9 @@ func update_plane(p: Dictionary, dt: float) -> void:
 					if path.size() > 1:
 						set_path(p, path)
 			if p["hold_timer"] >= p["max_hold"]:
-				divert(p, "too long without a gate", 10)
+				divert(p, "too long without a stand", 10)
 
-		"TAXI_TO_GATE":
+		"TAXI_TO_STAND":
 			match advance_along_path(p, taxi_speed(), dt):
 				"arrived":
 					p["state"] = "AWAIT_SERVICE"
@@ -1376,11 +1379,11 @@ func update_plane(p: Dictionary, dt: float) -> void:
 					if handle_blocked(p, dt):
 						divert(p, "gridlocked on the taxiway", 10)
 				"lost":
-					var gate = grid.get_gate(p["gate_id"])
-					if gate == null:
-						divert(p, "gate demolished en route", 10)
+					var stand = grid.get_stand(p["stand_id"])
+					if stand == null:
+						divert(p, "stand demolished en route", 10)
 					else:
-						var path := grid.find_path(p["cell"], grid.gate_park_cell(gate))
+						var path := grid.find_path(p["cell"], grid.stand_park_cell(stand))
 						if path.size() > 1:
 							set_path(p, path)
 						else:
@@ -1390,23 +1393,23 @@ func update_plane(p: Dictionary, dt: float) -> void:
 		"AWAIT_SERVICE":
 			p["service_wait"] += dt
 			if try_start_service(p):
-				p["state"] = "AT_GATE"
+				p["state"] = "AT_STAND"
 				p["state_timer"] = 0.0
 				var extra := " (line check)" if p["holds"].has("mech") else ""
-				var gate = grid.get_gate(p["gate_id"])
+				var stand = grid.get_stand(p["stand_id"])
 				# No jet bridge means bussing every passenger, which takes longer.
-				if gate != null and not grid.gate_is_contact(gate):
+				if stand != null and not grid.stand_is_contact(stand):
 					p["turnaround"] *= REMOTE_STAND_FACTOR
 					extra += " (remote stand)"
-				add_log("%s at Gate %d, turning around%s." % [p["callsign"], p["gate_id"] + 1, extra])
+				add_log("%s at Stand %d, turning around%s." % [p["callsign"], p["stand_id"] + 1, extra])
 			elif p["service_wait"] >= SERVICE_PATIENCE and not p["delay_logged"]:
 				p["delay_logged"] = true
 				reputation = max(0, reputation - 4)
-				add_log("%s stuck at Gate %d — %s. Reputation -4." % [
-					p["callsign"], p["gate_id"] + 1, service_shortfall(p),
+				add_log("%s stuck at Stand %d — %s. Reputation -4." % [
+					p["callsign"], p["stand_id"] + 1, service_shortfall(p),
 				])
 
-		"AT_GATE":
+		"AT_STAND":
 			if p["state_timer"] >= p["turnaround"]:
 				var take: int = p["payout"]
 				if p["holds"].has("mech"):
@@ -1432,11 +1435,11 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			p["runway_id"] = departure["runway"]["id"]
 			p["dep_from_b"] = departure["from_b"]
 			set_path(p, departure["path"])
-			# Gate frees at pushback, not at the runway — keeps throughput sane.
-			var gate = grid.get_gate(p["gate_id"])
-			if gate != null:
-				gate["occupied"] = false
-			p["gate_id"] = -1
+			# Stand frees at pushback, not at the runway — keeps throughput sane.
+			var stand = grid.get_stand(p["stand_id"])
+			if stand != null:
+				stand["occupied"] = false
+			p["stand_id"] = -1
 			p["state"] = "TAXI_OUT"
 			p["state_timer"] = 0.0
 
@@ -1523,23 +1526,23 @@ func apply_tool_at(cell: Vector2i) -> void:
 			money -= COST_TAXIWAY
 			grid.place_taxiway(cell)
 
-		Tool.GATE_SMALL, Tool.GATE_LARGE:
-			var size := tool_gate_size()
-			var cells := grid.gate_cells_for(cell, size)
-			if not grid.can_place_gate(cells):
+		Tool.STAND_SMALL, Tool.STAND_LARGE:
+			var size := tool_stand_size()
+			var cells := grid.stand_cells_for(cell, size)
+			if not grid.can_place_stand(cells):
 				return
-			var gate_cost: int = COST_GATE_TILE * size
-			if money < gate_cost:
-				add_log("Not enough cash for that stand (%s)." % money_str(gate_cost))
+			var stand_cost: int = COST_STAND_TILE * size
+			if money < stand_cost:
+				add_log("Not enough cash for that stand (%s)." % money_str(stand_cost))
 				return
-			money -= gate_cost
-			var id := grid.place_gate(cells, size)
+			money -= stand_cost
+			var id := grid.place_stand(cells, size)
 			var kind := "widebody stand" if size >= 2 else "stand"
-			var gate = grid.get_gate(id)
-			if grid.gate_is_connected(gate):
-				add_log("Built Gate %d (%s) for %s." % [id + 1, kind, money_str(gate_cost)])
+			var stand = grid.get_stand(id)
+			if grid.stand_is_connected(stand):
+				add_log("Built Stand %d (%s) for %s." % [id + 1, kind, money_str(stand_cost)])
 			else:
-				add_log("Built Gate %d — NOT connected to a taxiway, no flights will use it." % (id + 1))
+				add_log("Built Stand %d — NOT connected to a taxiway, no flights will use it." % (id + 1))
 
 		Tool.TERMINAL:
 			if not grid.can_place_terminal(cell):
@@ -1665,8 +1668,8 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 			_runway_capability(length),
 		])
 	render3d.mark_layout_dirty()
-func tool_gate_size() -> int:
-	return 2 if tool == Tool.GATE_LARGE else 1
+func tool_stand_size() -> int:
+	return 2 if tool == Tool.STAND_LARGE else 1
 
 
 func tile_cost(type: int) -> int:
@@ -1675,8 +1678,8 @@ func tile_cost(type: int) -> int:
 			return COST_TAXIWAY
 		AirportGrid.TileType.RUNWAY:
 			return COST_RUNWAY_TILE
-		AirportGrid.TileType.GATE:
-			return COST_GATE_TILE
+		AirportGrid.TileType.STAND:
+			return COST_STAND_TILE
 		AirportGrid.TileType.TERMINAL:
 			return COST_TERMINAL_TILE
 		AirportGrid.TileType.ROAD:
@@ -1766,21 +1769,21 @@ func _handle_select_click(pos: Vector2, cell: Vector2i) -> void:
 			add_log("Selected %s (%s)." % [p["callsign"], p["state"]])
 			return
 
-	var gate = grid.gate_at(cell)
-	if gate != null:
-		if gate["occupied"]:
-			add_log("Gate %d is occupied." % (gate["id"] + 1))
+	var stand = grid.stand_at(cell)
+	if stand != null:
+		if stand["occupied"]:
+			add_log("Stand %d is occupied." % (stand["id"] + 1))
 			return
-		if not grid.gate_is_connected(gate):
-			add_log("Gate %d has no taxiway connection." % (gate["id"] + 1))
+		if not grid.stand_is_connected(stand):
+			add_log("Stand %d has no taxiway connection." % (stand["id"] + 1))
 			return
 		var p = find_plane(selected_plane_id)
 		if p == null:
 			add_log("Select a holding plane first.")
 		elif p["state"] != "HOLDING":
-			add_log("%s is not holding for a gate." % p["callsign"])
+			add_log("%s is not holding for a stand." % p["callsign"])
 		else:
-			assign_gate_manual(p, gate)
+			assign_stand_manual(p, stand)
 			selected_plane_id = -1
 		return
 
@@ -1827,8 +1830,8 @@ func _end_run() -> void:
 # the tower matters, which is why buying tower capacity alone made things worse.
 func service_capacity() -> int:
 	var stands := 0
-	for g in grid.gates:
-		if grid.gate_is_connected(g):
+	for g in grid.stands:
+		if grid.stand_is_connected(g):
 			stands += 1
 	return maxi(1, mini(
 		mini(stands, capacity("crew")),
@@ -2132,15 +2135,15 @@ func _update_hud() -> void:
 	for r in grid.runways:
 		if grid.runway_is_usable(r):
 			usable_runways += 1
-	var connected_gates := 0
+	var connected_stands := 0
 	var wide_stands := 0
 	var contact_stands := 0
-	for g in grid.gates:
-		if grid.gate_is_connected(g):
-			connected_gates += 1
+	for g in grid.stands:
+		if grid.stand_is_connected(g):
+			connected_stands += 1
 			if g["size"] >= 2:
 				wide_stands += 1
-			if grid.gate_is_contact(g):
+			if grid.stand_is_contact(g):
 				contact_stands += 1
 	var longest := 0.0
 	for r in grid.runways:
@@ -2148,16 +2151,16 @@ func _update_hud() -> void:
 			longest = maxf(longest, grid.runway_length_tiles(r))
 	stats_label.text = "Runways: %d (%d usable, longest %s → %s)\nStands: %d connected of %d (%d widebody, %d bridged)\nAircraft: %d\nServed: %d   Lost: %d" % [
 		grid.runways.size(), usable_runways, length_str(longest), _runway_capability(longest),
-		connected_gates, grid.gates.size(), wide_stands, contact_stands, planes.size(),
+		connected_stands, grid.stands.size(), wide_stands, contact_stands, planes.size(),
 		served, diverted,
 	]
 
 	match tool:
 		Tool.SELECT:
-			hint_label.text = "SELECT — click a plane to see its route,\nthen click a free gate to assign it."
+			hint_label.text = "SELECT — click a plane to see its route,\nthen click a free stand to assign it."
 			tool_info_label.text = "Demolish refunds %d%%" % int(REFUND_RATE * 100)
 		Tool.TAXIWAY:
-			hint_label.text = "TAXIWAY — click or drag to paint.\nGates and runways need a taxiway connection."
+			hint_label.text = "TAXIWAY — click or drag to paint.\nStands and runways need a taxiway connection."
 			tool_info_label.text = "%s per tile" % money_str(COST_TAXIWAY)
 		Tool.RUNWAY:
 			hint_label.text = "RUNWAY — drag any angle. 1 tile = %d %s\n%s" % [
@@ -2186,12 +2189,12 @@ func _update_hud() -> void:
 				tool_info_label.text = "%s%s · %s · %s · %s" % [prefix, length_str(total), heading, takes, money_str(cost)]
 			else:
 				tool_info_label.text = "%s per tile" % money_str(COST_RUNWAY_TILE)
-		Tool.GATE_SMALL:
+		Tool.STAND_SMALL:
 			hint_label.text = "STAND (small) — 1 tile, next to a taxiway.\nTakes Light and Narrowbody."
-			tool_info_label.text = money_str(COST_GATE_TILE)
-		Tool.GATE_LARGE:
+			tool_info_label.text = money_str(COST_STAND_TILE)
+		Tool.STAND_LARGE:
 			hint_label.text = "STAND (widebody) — 2 tiles wide.\nTakes any aircraft, including Widebody."
-			tool_info_label.text = money_str(COST_GATE_TILE * 2)
+			tool_info_label.text = money_str(COST_STAND_TILE * 2)
 		Tool.TERMINAL:
 			hint_label.text = "CONCOURSE — click to build. Stands touching one\nget a jet bridge; the rest have to bus passengers."
 			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_TERMINAL_TILE), TERM_UNITS_PER_TILE]
@@ -2202,7 +2205,7 @@ func _update_hud() -> void:
 			hint_label.text = "CAR PARK — click to build beside a road.\nAdds passenger capacity."
 			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_PARKING_TILE), PARK_UNITS_PER_TILE]
 		Tool.DEMOLISH:
-			hint_label.text = "DEMOLISH — click to remove.\nOccupied gates and runways can't be removed."
+			hint_label.text = "DEMOLISH — click to remove.\nOccupied stands and runways can't be removed."
 			tool_info_label.text = "Refunds %d%%" % int(REFUND_RATE * 100)
 		Tool.LAND:
 			hint_label.text = "BUY LAND — click a marked tract to buy it.\nNothing can be built on land you don't own."
@@ -2229,7 +2232,7 @@ func _sync_world() -> void:
 	if render3d == null:
 		return
 	render3d.rebuild_if_dirty()
-	render3d.sync_gates()
+	render3d.sync_stands()
 	render3d.sync_planes(_plane_records())
 	render3d.set_weather(weather.get("kind", ""))
 	_sync_ghost()
@@ -2262,12 +2265,12 @@ func _plane_status_color(p: Dictionary) -> Color:
 			color = Color(0.96, 0.65, 0.26)
 		"HOLDING":
 			color = Color(0.96, 0.83, 0.26)
-		"AT_GATE", "AWAIT_DEPART":
+		"AT_STAND", "AWAIT_DEPART":
 			color = Color(0.26, 0.77, 0.96)
 	if p["blocked_timer"] > 1.0:
 		color = Color(0.95, 0.35, 0.35)
 	# An emergency has to be findable at a glance, so it overrides state colour.
-	if p.get("emergency", false) and p["state"] != "AT_GATE":
+	if p.get("emergency", false) and p["state"] != "AT_STAND":
 		color = Color(1.0, 0.25, 0.55)
 	if selected_plane_id == p["id"]:
 		color = Color(1.0, 0.37, 0.82)
@@ -2330,10 +2333,10 @@ func _sync_ghost() -> void:
 			ok = grid.can_place_road(hover_cell) and money >= COST_ROAD_TILE
 		Tool.PARKING:
 			ok = grid.can_place_parking(hover_cell) and money >= COST_PARKING_TILE
-		Tool.GATE_SMALL, Tool.GATE_LARGE:
-			var size := tool_gate_size()
-			cells = grid.gate_cells_for(hover_cell, size)
-			ok = grid.can_place_gate(cells) and money >= COST_GATE_TILE * size
+		Tool.STAND_SMALL, Tool.STAND_LARGE:
+			var size := tool_stand_size()
+			cells = grid.stand_cells_for(hover_cell, size)
+			ok = grid.can_place_stand(cells) and money >= COST_STAND_TILE * size
 		Tool.DEMOLISH:
 			var preview := grid.demolish_preview(hover_cell)
 			ok = not preview.is_empty()
@@ -2357,8 +2360,8 @@ func _draw() -> void:
 
 	for r in grid.runways:
 		_label_runway(r)
-	for g in grid.gates:
-		_label_gate(g)
+	for g in grid.stands:
+		_label_stand(g)
 	for p in planes:
 		_label_plane(p)
 
@@ -2423,18 +2426,18 @@ func _label_runway(r: Dictionary) -> void:
 	draw_string(ThemeDB.fallback_font, at, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_color)
 
 
-func _label_gate(g: Dictionary) -> void:
+func _label_stand(g: Dictionary) -> void:
 	var cells: Array = g["cells"]
 	var centre := Vector2.ZERO
 	for c in cells:
 		centre += grid.cell_to_world(c)
 	centre /= float(cells.size())
 
-	var tag := "G%d%s" % [g["id"] + 1, "·W" if g["size"] >= 2 else ""]
-	var at: Vector2 = render3d.world_to_screen(centre, Render3D.H_GATE) + Vector2(-10, 4)
+	var tag := "S%d%s" % [g["id"] + 1, "·W" if g["size"] >= 2 else ""]
+	var at: Vector2 = render3d.world_to_screen(centre, Render3D.H_STAND) + Vector2(-10, 4)
 	draw_string(ThemeDB.fallback_font, at, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 12,
 		Color(0.95, 0.95, 0.95))
-	if not grid.gate_is_connected(g):
+	if not grid.stand_is_connected(g):
 		draw_string(ThemeDB.fallback_font, at + Vector2(-8, -14), "unconnected",
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1.0, 0.55, 0.55))
 
