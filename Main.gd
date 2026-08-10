@@ -228,6 +228,12 @@ var is_dragging := false
 @onready var tool_info_label: Label = $UI/ToolInfoLabel
 @onready var log_label: RichTextLabel = $UI/LogLabel
 
+# Built in code rather than added to Main.tscn: it is a full-width overlay that
+# only ever appears during a closure, and keeping it here keeps the scene file
+# describing the permanent HUD.
+var closure_banner: Panel
+var closure_label: Label
+
 
 func _ready() -> void:
 	randomize()
@@ -265,6 +271,7 @@ func _ready() -> void:
 	$UI/SaveBtn.pressed.connect(save_game)
 	$UI/LoadBtn.pressed.connect(load_game)
 	_refresh_save_buttons()
+	_build_closure_banner()
 
 	# Godot's default Button style nearly vanishes on a dark panel, so the sidebar
 	# controls get an explicit one.
@@ -296,6 +303,52 @@ func _ready() -> void:
 	# session — they shouldn't make a network call or depend on GitHub being up.
 	if not (_echo_log or _auto_sign):
 		_check_for_update()
+
+
+# A closure stops every movement on the field, which previously said so only as
+# one line in a scrolling log. It is the single most consequential thing the
+# weather does, so it gets a banner across the top of the view.
+func _build_closure_banner() -> void:
+	closure_banner = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.42, 0.10, 0.10, 0.93)
+	style.border_color = Color(1.0, 0.45, 0.35)
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.corner_radius_top_left = 5
+	style.corner_radius_top_right = 5
+	style.corner_radius_bottom_left = 5
+	style.corner_radius_bottom_right = 5
+	closure_banner.add_theme_stylebox_override("panel", style)
+	closure_banner.position = Vector2(150, 104)
+	closure_banner.size = Vector2(724, 48)
+	closure_banner.visible = false
+	$UI.add_child(closure_banner)
+
+	closure_label = Label.new()
+	closure_label.position = Vector2(0, 0)
+	closure_label.size = Vector2(724, 48)
+	closure_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	closure_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	closure_label.add_theme_font_size_override("font_size", 20)
+	closure_label.add_theme_color_override("font_color", Color(1, 0.92, 0.88))
+	closure_banner.add_child(closure_label)
+
+
+func _update_closure_banner() -> void:
+	var closed := wx_closed()
+	closure_banner.visible = closed
+	if not closed:
+		return
+	closure_label.text = "⛔  AIRPORT CLOSED — %s  ·  %s" % [
+		weather.get("name", "Weather"), weather.get("blurb", ""),
+	]
+	# Slow pulse on the border, so it stays noticeable without strobing.
+	var pulse: float = 0.55 + 0.45 * absf(sin(time_elapsed * 2.2))
+	var sb: StyleBoxFlat = closure_banner.get_theme_stylebox("panel")
+	sb.border_color = Color(1.0, 0.45, 0.35, pulse)
 
 
 func _check_for_update() -> void:
@@ -364,6 +417,9 @@ func _choose_setup(i: int) -> void:
 			return
 		region = regions[i]
 		setup_stage = 2
+		# Terrain is purely cosmetic, but it can only be applied now: the
+		# renderer is built in _ready, well before a region exists.
+		render3d.set_terrain(Regions.TERRAIN[region["terrain"]])
 		_show_setup()
 		add_log("Airport sited in %s, %s." % [region["name"], continent_name])
 		var kinds := []
@@ -2140,7 +2196,9 @@ func _sync_world() -> void:
 	render3d.rebuild_if_dirty()
 	render3d.sync_gates()
 	render3d.sync_planes(_plane_records())
+	render3d.set_weather(weather.get("kind", ""))
 	_sync_ghost()
+	_update_closure_banner()
 
 
 # Altitude is a rendering concern only — the simulation is still purely 2D, and

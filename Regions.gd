@@ -36,12 +36,78 @@ const WEATHER := {
 	},
 }
 
+# Terrain is cosmetic — it changes the ground colour and what is scattered
+# around the airport perimeter, never the simulation. Regions share terrains
+# where they plausibly look alike, rather than each inventing its own.
+#
+#   field    - the airport's own ground, inside the fence
+#   surround - the land beyond it
+#   feature  - what is scattered outside the perimeter
+#   accent   - snow caps, foliage; meaning depends on the feature
+const TERRAIN := {
+	"temperate": {
+		"name": "temperate grassland",
+		"field": Color(0.19, 0.31, 0.19), "surround": Color(0.227, 0.361, 0.227),
+		"feature": "conifers", "feature_color": Color(0.13, 0.26, 0.16),
+		"accent": Color(0.20, 0.34, 0.20), "density": 150,
+	},
+	"desert": {
+		"name": "desert",
+		"field": Color(0.62, 0.51, 0.33), "surround": Color(0.70, 0.58, 0.39),
+		"feature": "mesas", "feature_color": Color(0.55, 0.36, 0.25),
+		"accent": Color(0.66, 0.46, 0.32), "density": 70,
+	},
+	"forest": {
+		"name": "temperate rainforest",
+		"field": Color(0.17, 0.28, 0.18), "surround": Color(0.15, 0.25, 0.17),
+		"feature": "conifers", "feature_color": Color(0.09, 0.20, 0.12),
+		"accent": Color(0.14, 0.28, 0.16), "density": 320,
+	},
+	"coastal": {
+		"name": "coastal lowland",
+		"field": Color(0.24, 0.33, 0.24), "surround": Color(0.28, 0.36, 0.28),
+		"feature": "dunes", "feature_color": Color(0.61, 0.57, 0.40),
+		"accent": Color(0.42, 0.45, 0.34), "density": 110,
+	},
+	"alpine": {
+		"name": "alpine",
+		"field": Color(0.24, 0.31, 0.24), "surround": Color(0.28, 0.33, 0.29),
+		"feature": "mountains", "feature_color": Color(0.34, 0.35, 0.38),
+		"accent": Color(0.93, 0.95, 0.97), "density": 46,
+	},
+	"highland": {
+		"name": "high sierra",
+		"field": Color(0.42, 0.36, 0.26), "surround": Color(0.46, 0.39, 0.29),
+		"feature": "mountains", "feature_color": Color(0.44, 0.33, 0.26),
+		"accent": Color(0.88, 0.86, 0.82), "density": 52,
+	},
+	"scrubland": {
+		"name": "dry scrub",
+		"field": Color(0.42, 0.42, 0.25), "surround": Color(0.48, 0.46, 0.29),
+		"feature": "scrub", "feature_color": Color(0.31, 0.35, 0.21),
+		"accent": Color(0.52, 0.48, 0.30), "density": 170,
+	},
+	"tropical": {
+		"name": "tropical",
+		"field": Color(0.18, 0.34, 0.20), "surround": Color(0.16, 0.31, 0.19),
+		"feature": "palms", "feature_color": Color(0.14, 0.30, 0.17),
+		"accent": Color(0.22, 0.42, 0.22), "density": 200,
+	},
+	"steppe": {
+		"name": "open steppe",
+		"field": Color(0.47, 0.44, 0.28), "surround": Color(0.52, 0.48, 0.31),
+		"feature": "scrub", "feature_color": Color(0.40, 0.39, 0.24),
+		"accent": Color(0.55, 0.51, 0.33), "density": 80,
+	},
+}
+
 const CONTINENTS := [
 	{
 		"name": "North America",
 		"regions": [
 			{
 				"name": "Great Lakes",
+				"terrain": "temperate",
 				"weather": ["snow", "fog", "storm"],
 				"origins": [
 					["HRB", "Harbour Point"], ["KWN", "Kewanee"], ["MTC", "Mount Clair"],
@@ -50,6 +116,7 @@ const CONTINENTS := [
 			},
 			{
 				"name": "Desert Southwest",
+				"terrain": "desert",
 				"weather": ["heat", "storm", "crosswind"],
 				"origins": [
 					["RDM", "Red Mesa"], ["SLV", "Silverton"], ["CTS", "Cactus Flat"],
@@ -58,6 +125,7 @@ const CONTINENTS := [
 			},
 			{
 				"name": "Pacific Northwest",
+				"terrain": "forest",
 				"weather": ["fog", "storm", "crosswind"],
 				"origins": [
 					["EVG", "Evergreen"], ["CDR", "Cedar Sound"], ["RNR", "Rainier Vale"],
@@ -71,6 +139,7 @@ const CONTINENTS := [
 		"regions": [
 			{
 				"name": "North Sea Coast",
+				"terrain": "coastal",
 				"weather": ["fog", "storm", "crosswind"],
 				"origins": [
 					["NHV", "Norderhaven"], ["BRG", "Bruggen"], ["ALK", "Aalkirk"],
@@ -79,6 +148,7 @@ const CONTINENTS := [
 			},
 			{
 				"name": "Alpine Interior",
+				"terrain": "alpine",
 				"weather": ["snow", "fog", "crosswind"],
 				"origins": [
 					["HCB", "Hochberg"], ["VLD", "Valdenne"], ["STM", "Steinmark"],
@@ -87,6 +157,7 @@ const CONTINENTS := [
 			},
 			{
 				"name": "Mediterranean",
+				"terrain": "scrubland",
 				"weather": ["heat", "storm", "fog"],
 				"origins": [
 					["PLR", "Portalero"], ["CSB", "Casabella"], ["ARG", "Argenta"],
@@ -100,6 +171,7 @@ const CONTINENTS := [
 		"regions": [
 			{
 				"name": "Monsoon Coast",
+				"terrain": "tropical",
 				"weather": ["storm", "fog", "heat"],
 				"origins": [
 					["KLB", "Kalibang"], ["SRT", "Sri Tanah"], ["MDN", "Madanpur"],
@@ -108,6 +180,7 @@ const CONTINENTS := [
 			},
 			{
 				"name": "Central Steppe",
+				"terrain": "steppe",
 				"weather": ["snow", "crosswind", "heat"],
 				"origins": [
 					["AQT", "Aqtobe Vale"], ["KRG", "Karagan"], ["ULN", "Ulan Dabaa"],
@@ -116,6 +189,7 @@ const CONTINENTS := [
 			},
 			{
 				"name": "Island Pacific",
+				"terrain": "tropical",
 				"weather": ["storm", "crosswind", "fog"],
 				"origins": [
 					["ISH", "Ishimura"], ["TKY", "Tokoyama"], ["NHA", "Naha Retto"],
@@ -129,6 +203,7 @@ const CONTINENTS := [
 		"regions": [
 			{
 				"name": "Andean Highlands",
+				"terrain": "highland",
 				"weather": ["heat", "fog", "crosswind"],
 				"origins": [
 					["ALT", "Altiplano"], ["CZC", "Cuzcala"], ["PAZ", "La Paza"],
@@ -137,6 +212,7 @@ const CONTINENTS := [
 			},
 			{
 				"name": "Tropical Lowlands",
+				"terrain": "tropical",
 				"weather": ["storm", "heat", "fog"],
 				"origins": [
 					["MNU", "Manaura"], ["BLM", "Belem Verde"], ["IQT", "Iquita"],
@@ -145,6 +221,7 @@ const CONTINENTS := [
 			},
 			{
 				"name": "Southern Cone",
+				"terrain": "temperate",
 				"weather": ["crosswind", "storm", "snow"],
 				"origins": [
 					["PTG", "Patagon"], ["BHB", "Bahia Blanca Sur"], ["MTV", "Montevida"],

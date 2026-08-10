@@ -436,6 +436,52 @@ func runway_name(r: Dictionary) -> String:
 	return "%02d%s/%02d%s" % [pair[0], suffix, pair[1], mirrored]
 
 
+# The designator painted on each threshold, as [at_a, at_b].
+#
+# `runway_headings` sorts its pair so the name reads low-first, which throws away
+# which number belongs at which end. The painted marking cannot be sorted: the
+# number under your wheels is the heading you will be flying once you rotate, so
+# the a->b heading is painted at a and its reciprocal at b.
+func runway_end_labels(r: Dictionary) -> Array:
+	var d: Vector2 = runway_direction(r)
+	var deg: float = rad_to_deg(atan2(d.x, -d.y))
+	if deg < 0.0:
+		deg += 360.0
+	var at_a := int(round(deg / 10.0))
+	if at_a == 0:
+		at_a = 36
+	var at_b := at_a + 18
+	if at_b > 36:
+		at_b -= 36
+
+	# Parallel runways carry L/C/R, and the suffix mirrors at the far end exactly
+	# as it does in reality — 09L is 27R read from the other threshold.
+	var suffix := ""
+	var pair := runway_headings(r)
+	var siblings := []
+	for other in runways:
+		if runway_headings(other) == pair:
+			siblings.append(other)
+	if siblings.size() > 1:
+		var axis := runway_direction(r)
+		var perp := Vector2(-axis.y, axis.x)
+		siblings.sort_custom(func(x, y): return perp.dot(x["a"]) < perp.dot(y["a"]))
+		var idx := 0
+		for i in siblings.size():
+			if siblings[i]["id"] == r["id"]:
+				idx = i
+				break
+		if siblings.size() == 2:
+			suffix = "L" if idx == 0 else "R"
+		elif siblings.size() == 3:
+			suffix = ["L", "C", "R"][idx]
+		else:
+			suffix = str(idx + 1)
+
+	var mirrored: String = {"L": "R", "R": "L", "C": "C"}.get(suffix, suffix)
+	return ["%02d%s" % [at_a, suffix], "%02d%s" % [at_b, mirrored]]
+
+
 # Taxiway touching the pavement nearest the threshold: where an outbound aircraft
 # waits without standing on the runway itself.
 func runway_hold_short_cell(r: Dictionary) -> Vector2i:

@@ -34,6 +34,8 @@ const ISO_YAW_DEG := 45.0
 # --- palette (carried over from the old 2D _draw(), so the game still reads as
 # itself — only the projection and the addition of height changed) ------------
 
+# Ground colours are per-region now (see Regions.TERRAIN); these are the fallback
+# used before a region has been chosen, and match the original temperate look.
 const COL_OUTSIDE := Color(0.227, 0.361, 0.227)
 const COL_FIELD := Color(0.19, 0.31, 0.19)
 const COL_TAXIWAY := Color(0.40, 0.40, 0.43)
@@ -93,6 +95,10 @@ var _plane_nodes := {}
 var _gate_nodes := {}
 var _mats := {}
 var _livery_cache := {}
+
+var _terrain: Dictionary = {}
+var _weather_kind := ""
+var _weather: CPUParticles3D
 
 var _yaw_deg := ISO_YAW_DEG
 var _pan := Vector2.ZERO
@@ -320,14 +326,178 @@ func _rebuild_static() -> void:
 	_build_gates()
 
 
+# Terrain is cosmetic and arrives only once the player picks a region, which is
+# after the renderer already exists — so it is applied late and forces a rebuild.
+func set_terrain(t: Dictionary) -> void:
+	_terrain = t
+	_mats.clear()
+	mark_layout_dirty()
+
+
+func _terrain_color(key: String, fallback: Color) -> Color:
+	if _terrain.has(key):
+		return _terrain[key]
+	return fallback
+
+
 func _build_ground() -> void:
 	var r: Rect2 = grid.grid_rect()
 	# A skirt well beyond the buildable area, so the field does not simply end in
 	# mid-air at this camera angle.
 	_slab(_static_root, Vector3(r.size.x * 4.0, 2.0, r.size.y * 4.0),
-		w3(r.position + r.size * 0.5, -2.0), _mat("skirt", COL_OUTSIDE))
+		w3(r.position + r.size * 0.5, -2.0),
+		_mat("skirt", _terrain_color("surround", COL_OUTSIDE)))
 	_slab(_static_root, Vector3(r.size.x, 2.0, r.size.y),
-		w3(r.position + r.size * 0.5, 0.0), _mat("field", COL_FIELD))
+		w3(r.position + r.size * 0.5, 0.0),
+		_mat("field", _terrain_color("field", COL_FIELD)))
+	_build_terrain_features()
+	_build_compass()
+
+
+# Scatter whatever the region grows outside the fence. Deterministic from the
+# terrain name so the skyline is stable across rebuilds — a fresh scatter every
+# time a taxiway is placed would make the horizon crawl.
+func _build_terrain_features() -> void:
+	if _terrain.is_empty():
+		return
+	var kind: String = _terrain.get("feature", "none")
+	if kind == "none":
+		return
+
+	var rng := RandomNumberGenerator.new()
+	rng.seed = hash(str(_terrain.get("name", "x")))
+
+	var r: Rect2 = grid.grid_rect()
+	# Keep a clear margin so nothing sprouts on the apron, and stay inside the
+	# skirt so features never float off its edge.
+	var inner := r.grow(AirportGrid.TILE * 1.5)
+	var outer := r.grow(AirportGrid.TILE * 13.0)
+	var body := _mat("feat", _terrain_color("feature_color", COL_OUTSIDE))
+	var accent := _mat("feataccent", _terrain_color("accent", COL_OUTSIDE))
+
+	var want: int = int(_terrain.get("density", 100))
+	var placed := 0
+	var guard := 0
+	while placed < want and guard < want * 12:
+		guard += 1
+		var p := Vector2(
+			rng.randf_range(outer.position.x, outer.end.x),
+			rng.randf_range(outer.position.y, outer.end.y))
+		if inner.has_point(p):
+			continue
+		_spawn_feature(kind, p, rng, body, accent)
+		placed += 1
+
+
+func _spawn_feature(kind: String, p: Vector2, rng: RandomNumberGenerator,
+		body: Material, accent: Material) -> void:
+	match kind:
+		"mountains":
+			# Big enough to actually ring the airport rather than read as rubble.
+			var h: float = rng.randf_range(90.0, 240.0)
+			var rad: float = h * rng.randf_range(0.45, 0.75)
+			_cone(p, rad, h, body)
+			# Snow line only on the taller peaks, which is what makes a range
+			# read as a range instead of a row of identical cones.
+			if h > 150.0:
+				_cone(p + Vector2(0.0, 0.0), rad * 0.34, h * 0.3, accent, h * 0.72)
+		"conifers":
+			var th: float = rng.randf_range(16.0, 30.0)
+			_cone(p, th * rng.randf_range(0.24, 0.34), th, body)
+		"palms":
+			var ph: float = rng.randf_range(20.0, 34.0)
+			_cylinder(p, 1.1, ph, accent)
+			_cone(p, 7.0, 8.0, body, ph * 0.86)
+		"mesas":
+			var mh: float = rng.randf_range(14.0, 34.0)
+			var mw: float = mh * rng.randf_range(0.8, 1.5)
+			var mi := _slab(_static_root, Vector3(mw, mh, mw * rng.randf_range(0.6, 1.0)),
+				w3(p, mh * 0.5), body)
+			mi.rotation.y = rng.randf_range(0.0, TAU)
+		"dunes":
+			var dh: float = rng.randf_range(6.0, 16.0)
+			var sm := SphereMesh.new()
+			sm.radius = dh * rng.randf_range(2.2, 4.0)
+			sm.height = dh * 2.0
+			var d := MeshInstance3D.new()
+			d.mesh = sm
+			d.material_override = body
+			d.position = w3(p, 0.0)
+			_static_root.add_child(d)
+		"scrub":
+			var sh: float = rng.randf_range(3.0, 7.0)
+			var s2 := SphereMesh.new()
+			s2.radius = sh
+			s2.height = sh * 1.4
+			var b := MeshInstance3D.new()
+			b.mesh = s2
+			b.material_override = body
+			b.position = w3(p, sh * 0.4)
+			_static_root.add_child(b)
+
+
+func _cone(p: Vector2, radius: float, height: float, mat: Material, base: float = 0.0) -> void:
+	var cm := CylinderMesh.new()
+	cm.top_radius = 0.0
+	cm.bottom_radius = radius
+	cm.height = height
+	cm.radial_segments = 7
+	var mi := MeshInstance3D.new()
+	mi.mesh = cm
+	mi.material_override = mat
+	mi.position = w3(p, base + height * 0.5)
+	_static_root.add_child(mi)
+
+
+func _cylinder(p: Vector2, radius: float, height: float, mat: Material) -> void:
+	var cm := CylinderMesh.new()
+	cm.top_radius = radius
+	cm.bottom_radius = radius
+	cm.height = height
+	cm.radial_segments = 6
+	var mi := MeshInstance3D.new()
+	mi.mesh = cm
+	mi.material_override = mat
+	mi.position = w3(p, height * 0.5)
+	_static_root.add_child(mi)
+
+
+# A compass rose painted on the field's north-west corner. World -y is north (the
+# same convention runway designators use), and because it is real ground geometry
+# rather than a HUD widget it stays truthful as the camera rotates.
+#
+# Painted inside the field rather than out on the surround: outside it sits
+# beyond the camera's default framing and is simply never seen. It is only a
+# ground marking, so building over it is harmless.
+func _build_compass() -> void:
+	var r: Rect2 = grid.grid_rect()
+	var c := r.position + Vector2(AirportGrid.TILE * 2.2, AirportGrid.TILE * 2.2)
+	var ink := _mat("compass", Color(0.93, 0.95, 0.93, 0.85), true)
+
+	var ring := TorusMesh.new()
+	ring.inner_radius = 30.0
+	ring.outer_radius = 33.0
+	var rm := MeshInstance3D.new()
+	rm.mesh = ring
+	rm.material_override = ink
+	rm.position = w3(c, H_MARKING)
+	_static_root.add_child(rm)
+
+	# North needle, then a shorter cross-bar for the other three points.
+	_slab(_static_root, Vector3(4.0, 0.6, 54.0), w3(c + Vector2(0.0, -6.0), H_MARKING), ink)
+	_slab(_static_root, Vector3(40.0, 0.6, 3.0), w3(c, H_MARKING), ink)
+
+	var n := Label3D.new()
+	n.text = "N"
+	n.font_size = 96
+	n.pixel_size = 0.42
+	n.modulate = Color(0.95, 0.97, 0.95)
+	n.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+	n.double_sided = true
+	n.no_depth_test = false
+	n.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
+	n.position = w3(c + Vector2(0.0, -46.0), H_MARKING)
+	_static_root.add_child(n)
 
 
 func _build_tiles() -> void:
@@ -446,6 +616,31 @@ func _build_runways() -> void:
 		for i in dashes:
 			var f: float = (float(i) + 0.5) / float(dashes)
 			_slab(_static_root, Vector3(12.0, 0.6, 1.8), w3(ea.lerp(eb, f), H_MARKING), mark, yaw)
+
+		# Threshold designators, painted on the pavement at each end.
+		var ends: Array = grid.runway_end_labels(r)
+		_paint_designator(ends[0], ea + axis * (t * 0.9), axis)
+		_paint_designator(ends[1], eb - axis * (t * 0.9), -axis)
+
+
+# Painted flat on the pavement rather than drawn as a screen-space label: it is a
+# runway marking, so it belongs to the ground and should rotate with the strip
+# and with the camera. `facing` is the direction a departing aircraft is looking,
+# which is the direction the numerals must read.
+func _paint_designator(text: String, at: Vector2, facing: Vector2) -> void:
+	var l := Label3D.new()
+	l.text = text
+	l.font_size = 128
+	l.pixel_size = 0.24
+	l.modulate = Color(0.94, 0.94, 0.94)
+	l.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+	l.double_sided = true
+	l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	l.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	# Lay it flat (-90 about X), then spin it so its "up" runs down the strip.
+	l.rotation_degrees = Vector3(-90.0, rad_to_deg(-facing.angle() - PI * 0.5), 0.0)
+	l.position = w3(at, H_MARKING)
+	_static_root.add_child(l)
 
 
 func _build_gates() -> void:
@@ -588,6 +783,86 @@ func sync_planes(records: Array) -> void:
 			continue
 		(_plane_nodes[id]["container"] as Node3D).queue_free()
 		_plane_nodes.erase(id)
+
+
+# --- weather ----------------------------------------------------------------
+#
+# CPUParticles3D rather than GPUParticles3D: the project runs the
+# gl_compatibility renderer, where CPU particles are the dependable option.
+#
+# The emitter is parented to the camera pivot and emits from a flat box above it,
+# so precipitation follows the view instead of being a patch of weather sitting
+# over one corner of a field the player may have panned away from.
+
+## `kind` is a Regions.WEATHER key, or "" for clear.
+func set_weather(kind: String) -> void:
+	if kind == _weather_kind:
+		return
+	_weather_kind = kind
+
+	if _weather != null:
+		_weather.queue_free()
+		_weather = null
+	if kind != "snow" and kind != "storm" and kind != "fog":
+		return
+
+	var p := CPUParticles3D.new()
+	p.local_coords = false
+	p.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	p.emission_box_extents = Vector3(900.0, 4.0, 900.0)
+	p.position = Vector3(0.0, 620.0, 0.0)
+	p.draw_order = CPUParticles3D.DRAW_ORDER_VIEW_DEPTH
+
+	var mesh := QuadMesh.new()
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	mat.vertex_color_use_as_albedo = true
+
+	match kind:
+		"snow":
+			mesh.size = Vector2(3.4, 3.4)
+			mat.albedo_color = Color(1, 1, 1, 0.9)
+			p.amount = 1400
+			p.lifetime = 7.0
+			p.gravity = Vector3(0.0, -70.0, 0.0)
+			# Lateral spread makes it drift rather than fall like a curtain.
+			p.initial_velocity_min = 8.0
+			p.initial_velocity_max = 26.0
+			p.direction = Vector3(0.35, -1.0, 0.2)
+			p.spread = 28.0
+		"storm":
+			mesh.size = Vector2(1.1, 13.0)
+			mat.albedo_color = Color(0.68, 0.78, 0.92, 0.55)
+			p.amount = 2200
+			p.lifetime = 2.2
+			p.gravity = Vector3(0.0, -900.0, 0.0)
+			p.initial_velocity_min = 220.0
+			p.initial_velocity_max = 300.0
+			p.direction = Vector3(0.18, -1.0, 0.1)
+			p.spread = 4.0
+		"fog":
+			# Fog is not precipitation — a few big, slow, near-transparent puffs
+			# drifting through read as murk without hiding the airport.
+			mesh.size = Vector2(150.0, 150.0)
+			mat.albedo_color = Color(0.78, 0.82, 0.85, 0.10)
+			p.amount = 26
+			p.lifetime = 26.0
+			p.gravity = Vector3.ZERO
+			p.initial_velocity_min = 4.0
+			p.initial_velocity_max = 12.0
+			p.direction = Vector3(1.0, 0.0, 0.3)
+			p.spread = 12.0
+			p.position = Vector3(0.0, 60.0, 0.0)
+			p.emission_box_extents = Vector3(900.0, 40.0, 900.0)
+
+	mesh.material = mat
+	p.mesh = mesh
+	# Pre-fill, so weather starting does not begin with an empty sky.
+	p.preprocess = p.lifetime
+	_yaw_node.add_child(p)
+	_weather = p
 
 
 # --- build ghost ------------------------------------------------------------
