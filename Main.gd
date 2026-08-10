@@ -1071,14 +1071,36 @@ func sell_facility(key: String) -> void:
 	if capacity(key) - int(d["per_unit"]) < int(used.get(key, 0)):
 		add_log("That %s is in use right now." % d["name"].to_lower(), "muted")
 		return
-	facilities[key] -= 1
 	# Bought during this same pause: undo it outright rather than taking the
-	# resale haircut.
+	# resale haircut. No confirmation, because an undo costs nothing.
 	var undo := _ledger_take("facility", "key", key)
 	if undo >= 0:
+		facilities[key] -= 1
 		money += undo
 		add_log("Undid %s — %s refunded in full." % [d["name"], money_str(undo)], "build")
 		return
+
+	var refund := int(int(d["cost"]) * REFUND_RATE)
+	# Selling at a loss is as unrecoverable as buying, and the sell button sits
+	# one pixel from the buy button.
+	if int(d["cost"]) >= CONFIRM_THRESHOLD:
+		_ask("Decommission a %s?\n\nIt cost %s and recovers only %s." % [
+			d["name"], money_str(d["cost"]), money_str(refund),
+		], _do_sell_facility.bind(key))
+		return
+	_do_sell_facility(key)
+
+
+func _do_sell_facility(key: String) -> void:
+	var d := fac_def(key)
+	if int(facilities.get(key, 0)) <= 0:
+		return
+	# Re-checked: the dialog is modal to input, but capacity can be taken while
+	# it is open.
+	if capacity(key) - int(d["per_unit"]) < int(used.get(key, 0)):
+		add_log("That %s is in use right now." % d["name"].to_lower(), "muted")
+		return
+	facilities[key] -= 1
 	var refund := int(int(d["cost"]) * REFUND_RATE)
 	money += refund
 	add_log("Decommissioned %s, recovered %s." % [d["name"], money_str(refund)], "money")
