@@ -164,7 +164,13 @@ const MAX_BLOCK_TIME := 20.0
 const REP_PER_TURNAROUND := 2
 const REP_MAX := 100
 
-const SAVE_PATH := "user://airport_save.dat"
+const SAVE_SLOTS := 3
+
+
+# One file per slot. The pre-slot save lived at a single fixed path and is not
+# migrated: SAVE_VERSION moved at the same time, so it would be rejected anyway.
+static func save_path(slot: int) -> String:
+	return "user://airport_save_%d.dat" % slot
 # 4: "gates"/"gate_seq" became "stands"/"stand_seq" in the grid payload. Older
 # saves are rejected rather than migrated — the save-slot paths changed at the
 # same time, so nothing was preserved across that boundary anyway.
@@ -261,6 +267,8 @@ var is_dragging := false
 var closure_banner: Panel
 var closure_label: Label
 
+var slot_panel: Panel
+var slot_rows: Array = []
 var help_panel: Panel
 var confirm_panel: Panel
 var confirm_label: Label
@@ -273,6 +281,7 @@ var _confirm_action: Callable = Callable()
 #
 # Entries: {"kind": "tile"|"land"|"facility", "cost": int, plus
 #           "cells": Array[Vector2i] | "tract": int | "key": String}
+var last_slot := 1
 var pause_ledger: Array = []
 # Guards the re-entrancy of setting PauseBtn.button_pressed from inside its own
 # toggled handler.
@@ -313,11 +322,14 @@ func _ready() -> void:
 	$UI/GameOverPanel/RestartBtn.pressed.connect(func(): get_tree().reload_current_scene())
 	$UI/RoutePanel/AcceptBtn.pressed.connect(accept_offer)
 	$UI/RoutePanel/DeclineBtn.pressed.connect(decline_offer)
-	$UI/SaveBtn.pressed.connect(save_game)
-	$UI/LoadBtn.pressed.connect(load_game)
+	# Both toolbar buttons open the same slot picker; F5/F9 remain the quick
+	# save/load against whichever slot was last used.
+	$UI/SaveBtn.pressed.connect(_toggle_slots)
+	$UI/LoadBtn.pressed.connect(_toggle_slots)
 	_refresh_save_buttons()
 	_build_closure_banner()
 	_build_confirm_dialog()
+	_build_slot_panel()
 	_build_help_panel()
 	$UI/HelpBtn.pressed.connect(_toggle_help)
 
@@ -470,6 +482,121 @@ func _on_confirm_no() -> void:
 	_confirm_action = Callable()
 	confirm_pending = false
 	confirm_panel.visible = false
+
+
+# --- save slots ---
+
+func _build_slot_panel() -> void:
+	slot_panel = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.1, 0.12, 0.98)
+	style.border_color = Color(0.55, 0.72, 0.66)
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	slot_panel.add_theme_stylebox_override("panel", style)
+	slot_panel.position = Vector2(260, 250)
+	slot_panel.size = Vector2(640, 322)
+	slot_panel.visible = false
+	$UI.add_child(slot_panel)
+
+	var title := Label.new()
+	title.position = Vector2(24, 16)
+	title.size = Vector2(592, 26)
+	title.add_theme_font_size_override("font_size", 18)
+	title.text = "SAVE SLOTS"
+	slot_panel.add_child(title)
+
+	for i in range(1, SAVE_SLOTS + 1):
+		var y := 34 + i * 58
+		var lbl := Label.new()
+		lbl.position = Vector2(24, y)
+		lbl.size = Vector2(370, 44)
+		lbl.add_theme_font_size_override("font_size", 13)
+		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		slot_panel.add_child(lbl)
+
+		var sb := Button.new()
+		sb.position = Vector2(402, y + 6)
+		sb.size = Vector2(100, 32)
+		sb.focus_mode = Control.FOCUS_NONE
+		sb.text = "Save"
+		sb.pressed.connect(_slot_save.bind(i))
+		_style_button(sb)
+		slot_panel.add_child(sb)
+
+		var lb := Button.new()
+		lb.position = Vector2(510, y + 6)
+		lb.size = Vector2(100, 32)
+		lb.focus_mode = Control.FOCUS_NONE
+		lb.text = "Load"
+		lb.pressed.connect(_slot_load.bind(i))
+		_style_button(lb)
+		slot_panel.add_child(lb)
+
+		slot_rows.append({"label": lbl, "load": lb})
+
+	var close := Button.new()
+	close.position = Vector2(24, 272)
+	close.size = Vector2(592, 34)
+	close.focus_mode = Control.FOCUS_NONE
+	close.text = "Close"
+	close.pressed.connect(_toggle_slots)
+	_style_button(close)
+	slot_panel.add_child(close)
+	_refresh_slot_rows()
+
+
+# Reads each slot's header without restoring it, so the picker can show what is
+# in there. Files are small, so this is cheap enough to do on every refresh.
+func _slot_summary(slot: int) -> String:
+	var path := save_path(slot)
+	if not FileAccess.file_exists(path):
+		return "Slot %d — empty" % slot
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return "Slot %d — unreadable" % slot
+	var d = f.get_var()
+	f.close()
+	if typeof(d) != TYPE_DICTIONARY:
+		return "Slot %d — unreadable" % slot
+	if d.get("version") != SAVE_VERSION:
+		return "Slot %d — older version, can't be loaded" % slot
+	return "Slot %d — Day %d · %s\n%s" % [
+		slot, int(d.get("day", 1)), money_str(int(d.get("money", 0))),
+		str(d.get("saved_at", "")),
+	]
+
+
+func _refresh_slot_rows() -> void:
+	if slot_rows.is_empty():
+		return
+	for i in slot_rows.size():
+		var slot := i + 1
+		var row: Dictionary = slot_rows[i]
+		(row["label"] as Label).text = _slot_summary(slot)
+		(row["load"] as Button).disabled = not FileAccess.file_exists(save_path(slot))
+
+
+func _toggle_slots() -> void:
+	slot_panel.visible = not slot_panel.visible
+	if slot_panel.visible:
+		_refresh_slot_rows()
+
+
+func _slot_save(slot: int) -> void:
+	save_game(slot)
+	_refresh_slot_rows()
+
+
+func _slot_load(slot: int) -> void:
+	load_game(slot)
+	slot_panel.visible = false
 
 
 # --- help overlay ---
@@ -2281,12 +2408,14 @@ func _simulate(dt: float) -> void:
 
 # --- persistence ---
 
-func save_game() -> void:
+func save_game(slot: int = -1) -> void:
+	if slot < 0:
+		slot = last_slot
 	# Saving a shut-down airport would just reload straight back into game over.
 	if game_over:
 		add_log("Can't save a shut-down airport.", "muted")
 		return
-	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	var f := FileAccess.open(save_path(slot), FileAccess.WRITE)
 	if f == null:
 		add_log("Could not write the save file.")
 		return
@@ -2306,56 +2435,61 @@ func save_game() -> void:
 		"offer": null if offer == null else offer.duplicate(true),
 		"next_offer_at": next_offer_at,
 		"grid": grid.to_dict(),
+		"saved_at": Time.get_datetime_string_from_system(true, true),
 	})
 	f.close()
-	add_log("Airport saved.")
+	last_slot = slot
+	add_log("Airport saved to slot %d." % slot, "build")
 	_refresh_save_buttons()
 
 
-func load_game() -> void:
-	if not FileAccess.file_exists(SAVE_PATH):
+func load_game(slot: int = -1) -> void:
+	if slot < 0:
+		slot = last_slot
+	if not FileAccess.file_exists(save_path(slot)):
+		add_log("Slot %d is empty." % slot, "muted")
 		return
-	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	var f := FileAccess.open(save_path(slot), FileAccess.READ)
 	if f == null:
 		add_log("Could not read the save file.")
 		return
 	var d = f.get_var()
 	f.close()
 	if typeof(d) != TYPE_DICTIONARY or d.get("version") != SAVE_VERSION:
-		add_log("That save was made by a different version — ignoring it.")
+		add_log("Slot %d was written by a different version — ignoring it." % slot, "warning")
 		return
 
 	# Airborne aircraft are not saved, so clear the sky before restoring.
 	planes.clear()
 	selected_plane_id = -1
-	grid.from_dict(d["grid"])
+	grid.from_dict(d.get("grid", grid.to_dict()))
 	render3d.mark_layout_dirty()
 	# A restored game starts with nothing uncommitted, whatever was pending when
 	# the save was written.
 	pause_ledger.clear()
 
-	money = d["money"]
-	reputation = d["reputation"]
-	time_elapsed = d["time_elapsed"]
-	served = d["served"]
-	diverted = d["diverted"]
-	earned = d["earned"]
-	next_spawn_at = d["next_spawn_at"]
-	plane_id_seq = d["plane_id_seq"]
-	day = d["day"]
-	day_time = d["day_time"]
-	day_revenue = d["day_revenue"]
-	last_day_revenue = d["last_day_revenue"]
-	last_upkeep = d["last_upkeep"]
-	facilities = d["facilities"]
+	money = d.get("money", money)
+	reputation = d.get("reputation", reputation)
+	time_elapsed = d.get("time_elapsed", time_elapsed)
+	served = d.get("served", served)
+	diverted = d.get("diverted", diverted)
+	earned = d.get("earned", earned)
+	next_spawn_at = d.get("next_spawn_at", next_spawn_at)
+	plane_id_seq = d.get("plane_id_seq", plane_id_seq)
+	day = d.get("day", day)
+	day_time = d.get("day_time", day_time)
+	day_revenue = d.get("day_revenue", day_revenue)
+	last_day_revenue = d.get("last_day_revenue", last_day_revenue)
+	last_upkeep = d.get("last_upkeep", last_upkeep)
+	facilities = d.get("facilities", facilities)
 	# No aircraft are restored, so nothing is holding ground support.
 	for k in used:
 		used[k] = 0
-	routes = d["routes"]
-	arrival_queue = d["arrival_queue"]
-	hub_airline = d["hub_airline"]
+	routes = d.get("routes", routes)
+	arrival_queue = d.get("arrival_queue", arrival_queue)
+	hub_airline = d.get("hub_airline", hub_airline)
 	# Location has to come back too, or weather and origins would be wrong.
-	continent_idx = d["continent_idx"]
+	continent_idx = d.get("continent_idx", continent_idx)
 	if continent_idx >= 0:
 		continent_name = Regions.CONTINENTS[continent_idx]["name"]
 		for r in Regions.CONTINENTS[continent_idx]["regions"]:
@@ -2363,16 +2497,23 @@ func load_game() -> void:
 				region = r
 		setup_stage = 2
 		_show_setup()
-	offer = d["offer"]
-	next_offer_at = d["next_offer_at"]
+	offer = d.get("offer", offer)
+	next_offer_at = d.get("next_offer_at", next_offer_at)
 
 	game_over = false
 	$UI/GameOverPanel.visible = false
-	add_log("Airport restored — the sky starts empty.")
+	last_slot = slot
+	_refresh_save_buttons()
+	add_log("Airport restored from slot %d — the sky starts empty." % slot, "build")
 
 
 func _refresh_save_buttons() -> void:
-	$UI/LoadBtn.disabled = not FileAccess.file_exists(SAVE_PATH)
+	var any := false
+	for i in range(1, SAVE_SLOTS + 1):
+		if FileAccess.file_exists(save_path(i)):
+			any = true
+	$UI/LoadBtn.disabled = not any
+	_refresh_slot_rows()
 
 
 # GDScript has no thousands separator, and "10800 ft" reads badly.
