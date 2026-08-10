@@ -68,12 +68,13 @@ than adding new mechanics.
 
 Ordered cheap-knob-first, so each can be judged before the next lands.
 
+**Already landed and needing a play session to judge:** demolition now *costs*
+a flat `COST_DEMOLISH_TILE` per tile rather than refunding, and anything bought
+during a pause can be undone in full until time resumes. Both are new balance
+levers that have never been played against.
+
 - [ ] Land holding cost ⚠️. Buying tracts is pure upside once affordable; a small
       per-tile upkeep makes *when* you expand a decision. **S**
-- [ ] Land holding cost is still open; demolition now COSTS a flat
-      `COST_DEMOLISH_TILE` per tile instead of refunding, and purchases made
-      during a pause can be undone in full until time resumes. Both want a play
-      session to judge. ⚠️
 - [ ] Fix the starter layout's road ⚠️. Only one of three concourse tiles touches
       the access road, so two-thirds of the building handles nobody. Fixing it
       roughly triples starting passenger capacity — a real balance change, which

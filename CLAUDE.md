@@ -52,9 +52,26 @@ Three consequences worth knowing before editing:
   *was* the world position. Any new input code must go through
   `render3d.screen_to_world()` first.
 
-Static geometry rebuilds only when the layout actually changes
-(`mark_layout_dirty()`), because stand occupancy flips constantly while the
-layout does not. Aircraft use `assets/models/widebody-airliner.glb`, whose
+Static geometry is split into **three rebuild tiers**, by how expensive a
+category is to regenerate rather than by who changed it:
+
+- **Session-static** — terrain scenery and the compass, built once and rebuilt
+  only by `set_terrain()`.
+- **Ownership-gated** — the ground tracts and camera framing, guarded by a
+  bitmask of `grid.owned_tracts`.
+- **Layout** — tiles, concourses, runways and stands, on `mark_layout_dirty()`.
+
+`mark_layout_dirty()` deliberately takes **no arguments**. A caller cannot know
+what it invalidated: painting a taxiway three tiles from a runway flips that
+runway's centreline from red to white via `runway_is_usable()`. Per-tile
+geometry is batched into `MultiMesh` by material — build instances with
+`Basis(UP, yaw) * Basis.from_scale(size)`, never `Basis.scaled()`, which
+post-multiplies and silently skews rotated runways. `set_terrain()` calls
+`_mats.clear()`, so it must invalidate **all three** tiers or live batches keep
+rendering through orphaned materials.
+
+Stands stay individual `MeshInstance3D`s on purpose: `sync_stands()` recolours
+them every frame, and batching would force per-instance colour. Aircraft use `assets/models/widebody-airliner.glb`, whose
 `livery` material is separate from `shell` — so per-airline colours are a
 material override, not an art pipeline.
 
@@ -101,6 +118,18 @@ eight compass points and was removed on purpose.
 effectively invisible. `Render3D.PLANE_SCALE_FUDGE` multiplies it, exactly as
 the old 2D renderer drew a 21px narrowbody against a 32px tile. Same rule as
 `REVENUE_SCALE` below: keep the lie in that one constant.
+
+**Pausing is an undo window, and demolition costs money.** Every purchase routes
+through `_spend()`, which records it in `pause_ledger` while paused. Demolishing
+or selling it during that same pause refunds the full amount; resuming time is
+the commit point and asks for confirmation. After that, demolition refunds
+nothing and *charges* `COST_DEMOLISH_TILE` per tile. `REFUND_RATE` survives only
+for selling facilities, which are equipment and genuinely resaleable.
+
+**Log severity is stored beside each line, never baked into it.** `--echo-log`
+mirrors the plain text to stdout and the balance-run verification below greps
+that output, so putting bbcode into `log_lines` would corrupt the documented
+check. The timestamp's own brackets are escaped as `[lb]`.
 
 **`REVENUE_SCALE` is a deliberate lie.** Capital costs in `Main.gd` are real
 2020s figures (runway pavement ~$2,500/linear ft, ATC tower ~$28M). Real
