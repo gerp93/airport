@@ -759,12 +759,68 @@ func _build_terminals() -> void:
 			run += 1
 
 		var centre: Vector2 = grid.cell_to_world(start) + Vector2((float(run) - 1.0) * t * 0.5, 0.0)
-		var width: float = float(run) * t
-		_add("term", "box", _mat("term", COL_TERMINAL),
-			Vector3(width, H_TERMINAL, t), w3(centre, H_TERMINAL * 0.5))
-		_add("termedge", "box", _mat("termedge", COL_TERMINAL_EDGE),
-			Vector3(width, H_KERB, t), w3(centre, H_TERMINAL + H_KERB * 0.5))
+		_build_concourse(start, run, centre)
 		i += run
+
+
+# A concourse as an actual building rather than a plain extruded block: a set-back
+# ground floor, a continuous glazing band, a parapet, rooftop plant, and a jet
+# bridge reaching out to any stand it fronts.
+#
+# Built parametrically here rather than as a mesh asset, because a run is any
+# length from one tile to the width of the field — a fixed mesh would have to be
+# stretched, and the glazing would stretch with it.
+func _build_concourse(start: Vector2i, run: int, centre: Vector2) -> void:
+	var t: float = AirportGrid.TILE
+	var width: float = float(run) * t
+
+	var body := _mat("term", COL_TERMINAL)
+	var trim := _mat("termedge", COL_TERMINAL_EDGE)
+	var glass := _mat("termglass", Color(0.55, 0.72, 0.85))
+
+	var ground_h := H_TERMINAL * 0.34
+	var upper_h := H_TERMINAL - ground_h
+
+	# Ground floor, slightly inset, so the upper storey reads as overhanging.
+	_add("term", "box", body, Vector3(width - 3.0, ground_h, t - 3.0),
+		w3(centre, ground_h * 0.5))
+	# Upper storey, full footprint.
+	_add("term", "box", body, Vector3(width, upper_h, t),
+		w3(centre, ground_h + upper_h * 0.5))
+
+	# Continuous glazing on both long faces, one band per tile so it never
+	# stretches with the run.
+	var band_y := ground_h + upper_h * 0.42
+	for k in run:
+		var cx: float = centre.x + (float(k) - (float(run) - 1.0) * 0.5) * t
+		for side in [-1.0, 1.0]:
+			_add("termglass", "box", glass,
+				Vector3(t * 0.78, upper_h * 0.34, 1.6),
+				w3(Vector2(cx, centre.y + side * (t * 0.5 - 0.4)), band_y))
+
+	# Parapet, then rooftop plant to break the silhouette.
+	_add("termedge", "box", trim, Vector3(width, H_KERB, t),
+		w3(centre, H_TERMINAL + H_KERB * 0.5))
+	for k in run:
+		if k % 2 == 1:
+			continue
+		var rx: float = centre.x + (float(k) - (float(run) - 1.0) * 0.5) * t
+		_add("term", "box", body, Vector3(t * 0.34, H_TERMINAL * 0.13, t * 0.30),
+			w3(Vector2(rx, centre.y - t * 0.12), H_TERMINAL + H_KERB + H_TERMINAL * 0.065))
+
+	# A jet bridge to any stand this concourse fronts, which is what makes a
+	# contact stand look different from a remote one.
+	for k in run:
+		var cell := Vector2i(start.x + k, start.y)
+		for d in [Vector2i.DOWN, Vector2i.UP]:
+			if grid.tile_type(cell + d) != AirportGrid.TileType.STAND:
+				continue
+			var from: Vector2 = grid.cell_to_world(cell)
+			var dir := Vector2(d)
+			_add("termedge", "box", trim,
+				Vector3(t * 0.20, H_TERMINAL * 0.10, t * 0.66),
+				w3(from + dir * (t * 0.52), ground_h * 0.92),
+				0.0 if absf(dir.y) > 0.0 else PI * 0.5)
 
 
 func _build_runways() -> void:
