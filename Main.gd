@@ -102,18 +102,22 @@ const FACILITIES := [
 	{
 		"key": "tower", "name": "Control Tower", "cost": 28_000_000,
 		"upkeep": 9_000, "per_unit": 4, "unit": "airborne",
+		"desc": "Caps how many aircraft may be airborne at once. Past the cap, inbound flights are turned away and cost reputation.",
 	},
 	{
 		"key": "crew", "name": "Ground Crew Team", "cost": 1_500_000,
 		"upkeep": 3_200, "per_unit": 2, "unit": "turnarounds",
+		"desc": "Caps simultaneous turnarounds. A landed aircraft sits at its stand until a crew frees up.",
 	},
 	{
 		"key": "fuel", "name": "Fuel Truck", "cost": 600_000,
 		"upkeep": 900, "per_unit": 2, "unit": "refuels",
+		"desc": "Caps simultaneous refuels. A turnaround needs a crew AND a truck, so the scarcer of the two is what limits you.",
 	},
 	{
 		"key": "mech", "name": "Maintenance Hangar", "cost": 22_000_000,
 		"upkeep": 7_500, "per_unit": 1, "unit": "checks",
+		"desc": "Lets you handle aircraft due a maintenance check. Without a hangar they divert, costing reputation.",
 	},
 ]
 const START_FACILITIES := {"tower": 1, "crew": 1, "fuel": 1, "mech": 0}
@@ -257,6 +261,7 @@ var is_dragging := false
 var closure_banner: Panel
 var closure_label: Label
 
+var help_panel: Panel
 var confirm_panel: Panel
 var confirm_label: Label
 var confirm_pending := false
@@ -313,6 +318,8 @@ func _ready() -> void:
 	_refresh_save_buttons()
 	_build_closure_banner()
 	_build_confirm_dialog()
+	_build_help_panel()
+	$UI/HelpBtn.pressed.connect(_toggle_help)
 
 	# Godot's default Button style nearly vanishes on a dark panel, so the sidebar
 	# controls get an explicit one.
@@ -463,6 +470,93 @@ func _on_confirm_no() -> void:
 	_confirm_action = Callable()
 	confirm_pending = false
 	confirm_panel.visible = false
+
+
+# --- help overlay ---
+
+func _build_help_panel() -> void:
+	help_panel = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.1, 0.12, 0.98)
+	style.border_color = Color(0.55, 0.72, 0.66)
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	help_panel.add_theme_stylebox_override("panel", style)
+	help_panel.position = Vector2(150, 110)
+	help_panel.size = Vector2(724, 470)
+	help_panel.visible = false
+	$UI.add_child(help_panel)
+
+	var title := Label.new()
+	title.position = Vector2(24, 16)
+	title.size = Vector2(676, 26)
+	title.add_theme_font_size_override("font_size", 18)
+	title.text = "CONTROLS  —  F1 or Help to close"
+	help_panel.add_child(title)
+
+	var body := Label.new()
+	body.position = Vector2(24, 54)
+	body.size = Vector2(676, 356)
+	body.add_theme_font_size_override("font_size", 14)
+	body.text = _help_text()
+	help_panel.add_child(body)
+
+	var close := Button.new()
+	close.position = Vector2(24, 420)
+	close.size = Vector2(676, 34)
+	close.focus_mode = Control.FOCUS_NONE
+	close.text = "Close"
+	close.pressed.connect(_toggle_help)
+	_style_button(close)
+	help_panel.add_child(close)
+
+
+func _help_text() -> String:
+	# Camera lines come from Render3D's own hint string, so the two cannot drift
+	# apart as bindings change.
+	return "\n".join([
+		"BUILD          T taxiway · R runway · G stand (small) · H stand (wide)",
+		"               E concourse · O road · P car park · X demolish · L buy land",
+		"               Esc back to Select",
+		"",
+		"SIMULATION     Space pause/resume · 1 / 2 / 3 speed",
+		"               A sign the offer · D pass on it",
+		"",
+		"SAVING         F5 save · F9 load",
+		"",
+		"CAMERA         " + _wrap_hint(Render3D.CAMERA_HINT),
+		"",
+		"PAUSING IS AN UNDO WINDOW",
+		"Anything bought while paused can be demolished or sold back for the full",
+		"amount. Resuming time locks it in — after that demolition refunds nothing",
+		"and costs " + money_str(COST_DEMOLISH_TILE) + " per tile.",
+	])
+
+
+# Three bindings per line. One per line made the camera block taller than the
+# rest of the sheet combined.
+func _wrap_hint(hint: String) -> String:
+	var parts := hint.split(" · ")
+	var lines := PackedStringArray()
+	var row := PackedStringArray()
+	for part in parts:
+		row.append(part)
+		if row.size() == 3:
+			lines.append(" · ".join(row))
+			row = PackedStringArray()
+	if row.size() > 0:
+		lines.append(" · ".join(row))
+	return "\n               ".join(lines)
+
+
+func _toggle_help() -> void:
+	help_panel.visible = not help_panel.visible
 
 
 # --- pause ledger ---
@@ -1993,6 +2087,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	# Save/load stay available after a shutdown so a bad run can be rolled back.
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
+			KEY_F1:
+				_toggle_help()
+				return
 			KEY_F5:
 				save_game()
 				return
@@ -2354,6 +2451,17 @@ func _update_ops_ui() -> void:
 		]
 		$UI/FacilityPanel.get_node("Row%dBuy" % i).disabled = money < int(f["cost"])
 		$UI/FacilityPanel.get_node("Row%dSell" % i).disabled = n <= 0
+
+		# Label defaults to MOUSE_FILTER_IGNORE, which swallows the tooltip
+		# entirely — without this the text is set but never shown.
+		var tip: String = "%s\n\n%s\n\nEach unit: +%d %s · %s to buy · %s/day" % [
+			f["name"], f["desc"], int(f["per_unit"]), f["unit"],
+			money_str(f["cost"]), money_str(f["upkeep"]),
+		]
+		lbl.mouse_filter = Control.MOUSE_FILTER_STOP
+		lbl.tooltip_text = tip
+		$UI/FacilityPanel.get_node("Row%dBuy" % i).tooltip_text = tip
+		$UI/FacilityPanel.get_node("Row%dSell" % i).tooltip_text = tip
 
 
 func _update_route_ui() -> void:

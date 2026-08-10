@@ -82,6 +82,9 @@ const PLANE_SCALE_FUDGE := 2.0
 const RUNWAY_WIDTH_TILES := 1.2
 const ROAD_WIDTH_TILES := 0.34
 
+# Shared with Main's help overlay so the two listings cannot drift apart.
+const CAMERA_HINT := "middle-drag pan · right-drag rotate · wheel zoom · arrows pan · , . rotate 45° · Home reset"
+
 var grid
 
 var _cam: Camera3D
@@ -131,7 +134,7 @@ func _build_hint() -> void:
 	_hint.position = Vector2(12, 648)
 	_hint.add_theme_font_size_override("font_size", 12)
 	_hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.5))
-	_hint.text = "CAMERA — middle-drag pan · right-drag rotate · wheel zoom · arrows pan · , . rotate 45° · Home reset"
+	_hint.text = "CAMERA — " + CAMERA_HINT
 	layer.add_child(_hint)
 
 

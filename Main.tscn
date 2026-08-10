@@ -195,6 +195,14 @@ toggle_mode = true
 button_group = SubResource("ButtonGroup_tools")
 text = "Buy Land"
 
+[node name="HelpBtn" type="Button" parent="UI"]
+offset_left = 950.0
+offset_top = 680.0
+offset_right = 1030.0
+offset_bottom = 712.0
+focus_mode = 0
+text = "Help (F1)"
+
 [node name="ToolInfoLabel" type="Label" parent="UI"]
 offset_left = 640.0
 offset_top = 650.0
