@@ -2145,7 +2145,10 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 		if is_equal_approx(grid.runway_length_tiles(existing), before):
 			add_log("That drag wouldn't lengthen Runway %s." % grid.runway_name(existing))
 			return
-		money -= ext_cost
+		# Recorded with no cells, so it counts toward the resume total but cannot
+		# be picked up by an undo: shortening a runway back to its old endpoint
+		# is not something the grid supports.
+		_spend(ext_cost, "runway_extension", {"cells": []})
 		add_log("Extended Runway %s to %s for %s — now takes %s." % [
 			grid.runway_name(existing), length_str(grid.runway_length_tiles(existing)),
 			money_str(ext_cost), _runway_capability(grid.runway_length_tiles(existing)),
@@ -2164,6 +2167,13 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 	money -= cost
 	var id := grid.place_runway_seg(pa, pb)
 	var runway = grid.get_runway(id)
+	# Ledgered after placement, because the footprint cells only exist once the
+	# segment is stamped. Demolish already clears a runway by all of its cells,
+	# so this undoes naturally.
+	if paused:
+		pause_ledger.append({
+			"kind": "tile", "cost": cost, "cells": (runway["cells"] as Array).duplicate(),
+		})
 	var length: float = grid.runway_length_tiles(runway)
 	if length < float(AirportGrid.MIN_RUNWAY_LEN):
 		add_log("Built Runway %s for %s — TOO SHORT (needs %s)." % [
