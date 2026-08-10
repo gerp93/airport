@@ -71,7 +71,20 @@ const REVENUE_SCALE := 40
 const COST_TAXIWAY := 500_000
 const COST_RUNWAY_TILE := 1_500_000
 const COST_STAND_TILE := 4_500_000
+# Facilities are equipment and can be sold on; buildings cannot. Selling a
+# facility still recovers this share, but DEMOLITION never refunds anything —
+# see COST_DEMOLISH_TILE.
 const REFUND_RATE := 0.5
+
+# Demolition costs money rather than returning it, at a flat rate per tile
+# regardless of what stood there — clearing a concourse section is the same
+# machine-hours as clearing a taxiway.
+const COST_DEMOLISH_TILE := 250_000
+
+# Anything at or above this asks for confirmation. Covers land tracts, concourse
+# sections, the tower and the maintenance hangar; a stray click on any of those
+# is otherwise unrecoverable.
+const CONFIRM_THRESHOLD := 5_000_000
 const TOW_FEE := 25_000
 
 const UPKEEP_RUNWAY := 2_000
@@ -244,6 +257,22 @@ var is_dragging := false
 var closure_banner: Panel
 var closure_label: Label
 
+var confirm_panel: Panel
+var confirm_label: Label
+var confirm_pending := false
+var _confirm_action: Callable = Callable()
+
+# Everything bought since the current pause began. While paused a purchase can be
+# undone for the full amount; resuming time locks the lot in. Cleared on resume,
+# on load, and whenever an entry is undone.
+#
+# Entries: {"kind": "tile"|"land"|"facility", "cost": int, plus
+#           "cells": Array[Vector2i] | "tract": int | "key": String}
+var pause_ledger: Array = []
+# Guards the re-entrancy of setting PauseBtn.button_pressed from inside its own
+# toggled handler.
+var _pause_guard := false
+
 
 func _ready() -> void:
 	randomize()
@@ -283,6 +312,7 @@ func _ready() -> void:
 	$UI/LoadBtn.pressed.connect(load_game)
 	_refresh_save_buttons()
 	_build_closure_banner()
+	_build_confirm_dialog()
 
 	# Godot's default Button style nearly vanishes on a dark panel, so the sidebar
 	# controls get an explicit one.
@@ -360,6 +390,179 @@ func _update_closure_banner() -> void:
 	var pulse: float = 0.55 + 0.45 * absf(sin(time_elapsed * 2.2))
 	var sb: StyleBoxFlat = closure_banner.get_theme_stylebox("panel")
 	sb.border_color = Color(1.0, 0.45, 0.35, pulse)
+
+
+# --- confirmation dialog ---
+#
+# Follows the existing modal precedent: a Panel in $UI plus an early return in
+# _unhandled_input. There is no input-blocking Control in this project and
+# GameOverPanel gets by the same way.
+
+func _build_confirm_dialog() -> void:
+	confirm_panel = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.1, 0.12, 0.98)
+	style.border_color = Color(0.88, 0.72, 0.33)
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	confirm_panel.add_theme_stylebox_override("panel", style)
+	confirm_panel.position = Vector2(300, 226)
+	confirm_panel.size = Vector2(560, 268)
+	confirm_panel.visible = false
+	$UI.add_child(confirm_panel)
+
+	confirm_label = Label.new()
+	confirm_label.position = Vector2(24, 20)
+	confirm_label.size = Vector2(512, 166)
+	confirm_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	confirm_label.add_theme_font_size_override("font_size", 15)
+	confirm_panel.add_child(confirm_label)
+
+	var yes := Button.new()
+	yes.position = Vector2(24, 210)
+	yes.size = Vector2(250, 36)
+	yes.focus_mode = Control.FOCUS_NONE
+	yes.text = "Confirm"
+	yes.pressed.connect(_on_confirm_yes)
+	_style_button(yes)
+	confirm_panel.add_child(yes)
+
+	var no := Button.new()
+	no.position = Vector2(286, 210)
+	no.size = Vector2(250, 36)
+	no.focus_mode = Control.FOCUS_NONE
+	no.text = "Cancel"
+	no.pressed.connect(_on_confirm_no)
+	_style_button(no)
+	confirm_panel.add_child(no)
+
+
+func _ask(body: String, on_confirm: Callable) -> void:
+	confirm_label.text = body
+	_confirm_action = on_confirm
+	confirm_pending = true
+	confirm_panel.visible = true
+
+
+func _on_confirm_yes() -> void:
+	var action := _confirm_action
+	_confirm_action = Callable()
+	confirm_pending = false
+	confirm_panel.visible = false
+	if action.is_valid():
+		action.call()
+
+
+func _on_confirm_no() -> void:
+	_confirm_action = Callable()
+	confirm_pending = false
+	confirm_panel.visible = false
+
+
+# --- pause ledger ---
+
+# Every purchase routes through here so the ledger cannot drift out of step with
+# what was actually spent.
+func _spend(amount: int, kind: String, data: Dictionary) -> void:
+	money -= amount
+	if not paused:
+		return
+	var e := data.duplicate()
+	e["kind"] = kind
+	e["cost"] = amount
+	pause_ledger.append(e)
+
+
+func pause_spend_total() -> int:
+	var t := 0
+	for e in pause_ledger:
+		t += int(e["cost"])
+	return t
+
+
+# Finds an unlocked purchase covering any of these cells and removes it,
+# returning what it cost — or -1 if these tiles were locked in by resuming.
+func _ledger_take_cells(cells: Array) -> int:
+	for i in pause_ledger.size():
+		var e: Dictionary = pause_ledger[i]
+		if e["kind"] != "tile":
+			continue
+		for c in cells:
+			if c in e["cells"]:
+				pause_ledger.remove_at(i)
+				return int(e["cost"])
+	return -1
+
+
+func _do_buy_tract(tract: int) -> void:
+	var land_cost := grid.tract_tiles(tract) * COST_LAND_TILE
+	if money < land_cost:
+		return
+	_spend(land_cost, "land", {"tract": tract})
+	grid.buy_tract(tract)
+	var tr: Rect2i = AirportGrid.TRACTS[tract]
+	add_log("Bought %d x %d tract for %s — %d tiles of new land." % [
+		tr.size.x, tr.size.y, money_str(land_cost), grid.tract_tiles(tract),
+	], "build")
+	render3d.mark_layout_dirty()
+
+
+# Clicking owned land with the Buy Land tool releases it, but only if it was
+# bought during the current pause and nothing has been built on it since.
+func _try_release_tract(cell: Vector2i) -> void:
+	var owned: int = grid.owned_tract_at(cell)
+	if owned < 0:
+		add_log("That land is already yours.", "muted")
+		return
+	var undo := _ledger_take("land", "tract", owned)
+	if undo < 0:
+		add_log("That tract was locked in when time resumed — it can't be sold back.", "muted")
+		return
+	if not grid.tract_is_bare(owned):
+		# Put the entry back: refusing must not silently forfeit the refund.
+		pause_ledger.append({"kind": "land", "tract": owned, "cost": undo})
+		add_log("Clear everything built on that tract before releasing it.", "muted")
+		return
+	grid.sell_tract(owned)
+	money += undo
+	add_log("Released that tract — %s refunded in full." % money_str(undo), "build")
+	render3d.mark_layout_dirty()
+
+
+func _confirm_demolish(cell: Vector2i, preview: Dictionary, fee: int) -> void:
+	_ask(
+		"Demolish %d tile(s)?\n\nThis was locked in when time resumed, so nothing is refunded. Clearing it costs %s."
+			% [preview["tiles"], money_str(fee)],
+		func() -> void:
+			# Re-check: the dialog is modal to input, but a stand can become
+			# occupied while it is open.
+			var now := grid.demolish_preview(cell)
+			if now.is_empty():
+				add_log("Can't demolish that — it's in use or empty.", "muted")
+				return
+			var due := COST_DEMOLISH_TILE * int(now["tiles"])
+			if money < due:
+				add_log("Not enough cash to demolish that (%s)." % money_str(due), "muted")
+				return
+			grid.demolish(cell)
+			money -= due
+			add_log("Demolished %d tile(s) — cost %s." % [now["tiles"], money_str(due)], "money")
+			render3d.mark_layout_dirty())
+
+
+func _ledger_take(kind: String, field: String, value) -> int:
+	for i in pause_ledger.size():
+		var e: Dictionary = pause_ledger[i]
+		if e["kind"] == kind and e[field] == value:
+			pause_ledger.remove_at(i)
+			return int(e["cost"])
+	return -1
 
 
 func _check_for_update() -> void:
@@ -458,8 +661,37 @@ func _style_button(b: Button) -> void:
 
 
 func _on_pause_toggled(on: bool) -> void:
+	if _pause_guard:
+		return
+	# Resuming with unlocked purchases is the commit point: refunds stop being
+	# available the moment the clock starts again, so it has to be deliberate.
+	if not on and not pause_ledger.is_empty():
+		_set_pause_button(true)
+		_ask(
+			"Resume time?\n\nYou have committed %s of construction during this pause.\n\nResuming locks it in. After this, demolition no longer refunds anything — it costs %s per tile."
+				% [money_str(pause_spend_total()), money_str(COST_DEMOLISH_TILE)],
+			_confirm_resume)
+		return
+	_apply_pause(on)
+
+
+func _apply_pause(on: bool) -> void:
 	paused = on
 	$UI/PauseBtn.text = "Resume" if on else "Pause"
+
+
+# Set the toggle without re-entering _on_pause_toggled.
+func _set_pause_button(pressed: bool) -> void:
+	_pause_guard = true
+	$UI/PauseBtn.button_pressed = pressed
+	_pause_guard = false
+
+
+func _confirm_resume() -> void:
+	add_log("Locked in %s of construction." % money_str(pause_spend_total()), "build")
+	pause_ledger.clear()
+	_set_pause_button(false)
+	_apply_pause(false)
 
 
 func _set_speed(s: float) -> void:
@@ -492,13 +724,38 @@ func _set_tool(t: Tool) -> void:
 		selected_plane_id = -1
 
 
-func add_log(msg: String) -> void:
-	log_lines.push_front("[%.1fs] %s" % [time_elapsed, msg])
+const LOG_COLORS := {
+	"critical": "#ff6f61",
+	"emergency": "#ff5ea8",
+	"warning": "#ffc65e",
+	"money": "#7fd6a0",
+	"build": "#8fc7ff",
+	"muted": "#8a949a",
+}
+
+
+## `severity` keys into LOG_COLORS; anything else renders in the default colour.
+func add_log(msg: String, severity: String = "") -> void:
+	# Plain text and severity are kept apart on purpose. `--echo-log` mirrors the
+	# plain line to stdout and CLAUDE.md's balance-run verification greps that
+	# output, so storing markup here would corrupt the documented check.
+	log_lines.push_front({"text": "[%.1fs] %s" % [time_elapsed, msg], "sev": severity})
 	if log_lines.size() > 40:
 		log_lines.resize(40)
-	log_label.text = "\n".join(log_lines)
+
+	var parts := PackedStringArray()
+	for e in log_lines:
+		# The timestamp's own brackets would otherwise parse as a bbcode tag.
+		var t: String = (e["text"] as String).replace("[", "[lb]")
+		var s: String = e["sev"]
+		if LOG_COLORS.has(s):
+			parts.append("[color=%s]%s[/color]" % [LOG_COLORS[s], t])
+		else:
+			parts.append(t)
+	log_label.text = "\n".join(parts)
+
 	if _echo_log:
-		print(log_lines[0])
+		print(log_lines[0]["text"])
 
 
 func find_plane(id: int) -> Variant:
@@ -566,11 +823,23 @@ func total_upkeep() -> int:
 func buy_facility(key: String) -> void:
 	var d := fac_def(key)
 	if money < int(d["cost"]):
-		add_log("Not enough cash for a %s (%s)." % [d["name"].to_lower(), money_str(d["cost"])])
+		add_log("Not enough cash for a %s (%s)." % [d["name"].to_lower(), money_str(d["cost"])], "muted")
 		return
-	money -= int(d["cost"])
+	if int(d["cost"]) >= CONFIRM_THRESHOLD and not paused:
+		_ask("Commission a %s for %s?\n\nUpkeep rises to %s per day." % [
+			d["name"], money_str(d["cost"]), money_str(total_upkeep() + int(d["upkeep"])),
+		], _do_buy_facility.bind(key))
+		return
+	_do_buy_facility(key)
+
+
+func _do_buy_facility(key: String) -> void:
+	var d := fac_def(key)
+	if money < int(d["cost"]):
+		return
+	_spend(int(d["cost"]), "facility", {"key": key})
 	facilities[key] = int(facilities.get(key, 0)) + 1
-	add_log("Commissioned %s. Upkeep now %s/day." % [d["name"], money_str(total_upkeep())])
+	add_log("Commissioned %s. Upkeep now %s/day." % [d["name"], money_str(total_upkeep())], "build")
 
 
 func sell_facility(key: String) -> void:
@@ -579,12 +848,19 @@ func sell_facility(key: String) -> void:
 		return
 	# Never sell capacity that aircraft are currently occupying.
 	if capacity(key) - int(d["per_unit"]) < int(used.get(key, 0)):
-		add_log("That %s is in use right now." % d["name"].to_lower())
+		add_log("That %s is in use right now." % d["name"].to_lower(), "muted")
 		return
 	facilities[key] -= 1
+	# Bought during this same pause: undo it outright rather than taking the
+	# resale haircut.
+	var undo := _ledger_take("facility", "key", key)
+	if undo >= 0:
+		money += undo
+		add_log("Undid %s — %s refunded in full." % [d["name"], money_str(undo)], "build")
+		return
 	var refund := int(int(d["cost"]) * REFUND_RATE)
 	money += refund
-	add_log("Decommissioned %s, recovered %s." % [d["name"], money_str(refund)])
+	add_log("Decommissioned %s, recovered %s." % [d["name"], money_str(refund)], "money")
 
 
 # Turnarounds need a crew, a fuel truck, and terminal capacity scaled by how many
@@ -687,11 +963,11 @@ func end_of_day() -> void:
 	last_upkeep = bill
 	last_day_revenue = day_revenue
 	day_revenue = 0
-	add_log("Day %d closed — took %s, upkeep %s." % [day, money_str(last_day_revenue), money_str(bill)])
+	add_log("Day %d closed — took %s, upkeep %s." % [day, money_str(last_day_revenue), money_str(bill)], "money")
 	day += 1
 	if money < 0:
 		reputation = max(0, reputation - 12)
-		add_log("OVERDRAWN — couldn't cover upkeep. Reputation -12.")
+		add_log("OVERDRAWN — couldn't cover upkeep. Reputation -12.", "critical")
 
 
 # --- airline relationships ---
@@ -845,7 +1121,7 @@ func accept_offer() -> void:
 			if hub_airline != "":
 				# Only one hub carrier at a time, and walking away from one is costly.
 				reputation = max(0, reputation - HUB_BREAK_REP)
-				add_log("Broke the %s hub agreement. Reputation -%d." % [hub_airline, HUB_BREAK_REP])
+				add_log("Broke the %s hub agreement. Reputation -%d." % [hub_airline, HUB_BREAK_REP], "critical")
 				routes = routes.filter(func(r): return not r.get("hub", false))
 			hub_airline = offer["airline"]
 			for o in offer["origins"]:
@@ -916,7 +1192,7 @@ func process_scheduled_arrivals() -> void:
 			diverted += 1
 			add_log("%s %s from %s TURNED AWAY — no capacity. Reputation -%d." % [
 				a["airline"], CLASSES[a["size"]]["name"], a["origin"][0], REP_TURNED_AWAY,
-			])
+			], "critical")
 
 
 func spawn_flight(airline: String, size: int, origin: Array, rate: float, kind: String) -> void:
@@ -950,7 +1226,7 @@ func spawn_flight(airline: String, size: int, origin: Array, rate: float, kind: 
 		planes[-1]["max_hold"] = 32.0
 		add_log("EMERGENCY — %s diverted to us from %s (%s). Needs priority." % [
 			callsign, origin[1], cls["name"],
-		])
+		], "emergency")
 	else:
 		add_log("%s inbound from %s — %s, fee %s." % [
 			callsign, origin[0], cls["name"], money_str(payout),
@@ -1129,7 +1405,7 @@ func divert(p: Dictionary, reason: String, rep_cost: int) -> void:
 		cost = maxi(1, rep_cost / 2)
 	reputation = max(0, reputation - cost)
 	diverted += 1
-	add_log("%s DIVERTED — %s. Reputation -%d." % [p["callsign"], reason, rep_cost])
+	add_log("%s DIVERTED — %s. Reputation -%d." % [p["callsign"], reason, rep_cost], "critical")
 	release_plane(p)
 
 
@@ -1255,7 +1531,7 @@ func find_departure_runway(p: Dictionary) -> Dictionary:
 func tow(p: Dictionary, reason: String) -> void:
 	money = max(0, money - TOW_FEE)
 	reputation = max(0, reputation - 5)
-	add_log("%s %s — towed off. -%s, Reputation -5." % [p["callsign"], reason, money_str(TOW_FEE)])
+	add_log("%s %s — towed off. -%s, Reputation -5." % [p["callsign"], reason, money_str(TOW_FEE)], "critical")
 	release_plane(p)
 
 
@@ -1350,7 +1626,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				p["state"] = "HOLDING"
 				p["hold_timer"] = 0.0
 				set_path(p, [])
-				add_log("%s holding — no free stand." % p["callsign"])
+				add_log("%s holding — no free stand." % p["callsign"], "warning")
 			else:
 				divert(p, "no taxi route to any stand", 10)
 
@@ -1407,7 +1683,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				reputation = max(0, reputation - 4)
 				add_log("%s stuck at Stand %d — %s. Reputation -4." % [
 					p["callsign"], p["stand_id"] + 1, service_shortfall(p),
-				])
+				], "critical")
 
 		"AT_STAND":
 			if p["state_timer"] >= p["turnaround"]:
@@ -1421,9 +1697,9 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				var rep_gain := REP_PER_TURNAROUND
 				if p.get("emergency", false):
 					rep_gain = REP_EMERGENCY_HANDLED
-					add_log("%s emergency handled. Reputation +%d." % [p["callsign"], rep_gain])
+					add_log("%s emergency handled. Reputation +%d." % [p["callsign"], rep_gain], "emergency")
 				reputation = min(REP_MAX, reputation + rep_gain)
-				add_log("%s turnaround complete. +%s" % [p["callsign"], money_str(take)])
+				add_log("%s turnaround complete. +%s" % [p["callsign"], money_str(take)], "money")
 				release_service(p)
 				p["state"] = "AWAIT_DEPART"
 				p["state_timer"] = 0.0
@@ -1521,9 +1797,9 @@ func apply_tool_at(cell: Vector2i) -> void:
 			if not grid.can_place_taxiway(cell):
 				return
 			if money < COST_TAXIWAY:
-				add_log("Not enough cash for taxiway (%s)." % money_str(COST_TAXIWAY))
+				add_log("Not enough cash for taxiway (%s)." % money_str(COST_TAXIWAY), "muted")
 				return
-			money -= COST_TAXIWAY
+			_spend(COST_TAXIWAY, "tile", {"cells": [cell]})
 			grid.place_taxiway(cell)
 
 		Tool.STAND_SMALL, Tool.STAND_LARGE:
@@ -1533,76 +1809,91 @@ func apply_tool_at(cell: Vector2i) -> void:
 				return
 			var stand_cost: int = COST_STAND_TILE * size
 			if money < stand_cost:
-				add_log("Not enough cash for that stand (%s)." % money_str(stand_cost))
+				add_log("Not enough cash for that stand (%s)." % money_str(stand_cost), "muted")
 				return
-			money -= stand_cost
+			_spend(stand_cost, "tile", {"cells": cells.duplicate()})
 			var id := grid.place_stand(cells, size)
 			var kind := "widebody stand" if size >= 2 else "stand"
 			var stand = grid.get_stand(id)
 			if grid.stand_is_connected(stand):
 				add_log("Built Stand %d (%s) for %s." % [id + 1, kind, money_str(stand_cost)])
 			else:
-				add_log("Built Stand %d — NOT connected to a taxiway, no flights will use it." % (id + 1))
+				add_log("Built Stand %d — NOT connected to a taxiway, no flights will use it." % (id + 1), "warning")
 
 		Tool.TERMINAL:
 			if not grid.can_place_terminal(cell):
 				return
 			if money < COST_TERMINAL_TILE:
-				add_log("Not enough cash for a concourse section (%s)." % money_str(COST_TERMINAL_TILE))
+				add_log("Not enough cash for a concourse section (%s)." % money_str(COST_TERMINAL_TILE), "muted")
 				return
-			money -= COST_TERMINAL_TILE
+			_spend(COST_TERMINAL_TILE, "tile", {"cells": [cell]})
 			grid.place_terminal(cell)
 			add_log("Built concourse section for %s — passenger capacity now %d." % [
 				money_str(COST_TERMINAL_TILE), capacity("term"),
 			])
 			if not grid.is_road_served(cell):
-				add_log("That concourse has no road access — it handles no passengers.")
+				add_log("That concourse has no road access — it handles no passengers.", "warning")
 
 		Tool.ROAD:
 			if not grid.can_place_road(cell):
 				return
 			if money < COST_ROAD_TILE:
-				add_log("Not enough cash for road (%s)." % money_str(COST_ROAD_TILE))
+				add_log("Not enough cash for road (%s)." % money_str(COST_ROAD_TILE), "muted")
 				return
-			money -= COST_ROAD_TILE
+			_spend(COST_ROAD_TILE, "tile", {"cells": [cell]})
 			grid.place_road(cell)
 
 		Tool.PARKING:
 			if not grid.can_place_parking(cell):
 				return
 			if money < COST_PARKING_TILE:
-				add_log("Not enough cash for a car park (%s)." % money_str(COST_PARKING_TILE))
+				add_log("Not enough cash for a car park (%s)." % money_str(COST_PARKING_TILE), "muted")
 				return
-			money -= COST_PARKING_TILE
+			_spend(COST_PARKING_TILE, "tile", {"cells": [cell]})
 			grid.place_parking(cell)
 			if not grid.is_road_served(cell):
-				add_log("Car park built but has no road to it — handles nobody yet.")
+				add_log("Car park built but has no road to it — handles nobody yet.", "warning")
 
 		Tool.LAND:
 			var tract := grid.tract_at(cell)
 			if tract < 0:
-				add_log("That land is already yours.")
+				_try_release_tract(cell)
 				return
 			var land_cost := grid.tract_tiles(tract) * COST_LAND_TILE
 			if money < land_cost:
-				add_log("Not enough cash for that tract (%s)." % money_str(land_cost))
+				add_log("Not enough cash for that tract (%s)." % money_str(land_cost), "muted")
 				return
-			money -= land_cost
-			grid.buy_tract(tract)
-			var tr: Rect2i = AirportGrid.TRACTS[tract]
-			add_log("Bought %d x %d tract for %s — %d tiles of new land." % [
-				tr.size.x, tr.size.y, money_str(land_cost), grid.tract_tiles(tract),
-			])
+			if land_cost >= CONFIRM_THRESHOLD and not paused:
+				var tsz: Rect2i = AirportGrid.TRACTS[tract]
+				_ask("Buy the %d x %d tract for %s?" % [tsz.size.x, tsz.size.y, money_str(land_cost)],
+					_do_buy_tract.bind(tract))
+				return
+			_do_buy_tract(tract)
 
 		Tool.DEMOLISH:
 			var preview := grid.demolish_preview(cell)
 			if preview.is_empty():
-				add_log("Can't demolish that — it's in use or empty.")
+				add_log("Can't demolish that — it's in use or empty.", "muted")
 				return
-			var refund := int(round(tile_cost(preview["type"]) * preview["tiles"] * REFUND_RATE))
-			grid.demolish(cell)
-			money += refund
-			add_log("Demolished %d tile(s), recovered %s." % [preview["tiles"], money_str(refund)])
+
+			# Still inside the pause it was bought in: this is an undo, refunded
+			# in full and struck from the ledger.
+			var undo := _ledger_take_cells(preview["cells"])
+			if undo >= 0:
+				grid.demolish(cell)
+				money += undo
+				add_log("Undid %d tile(s) — %s refunded in full." % [
+					preview["tiles"], money_str(undo),
+				], "build")
+				render3d.mark_layout_dirty()
+				return
+
+			var fee := COST_DEMOLISH_TILE * int(preview["tiles"])
+			if money < fee:
+				add_log("Not enough cash to demolish that (%s)." % money_str(fee), "muted")
+				return
+			_confirm_demolish(cell, preview, fee)
+			return
 
 	# Every branch above either returned on failure or changed the layout, so the
 	# 3D world is only rebuilt when something actually moved.
@@ -1624,7 +1915,7 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 		var added: float = maxf(0.0, pa.distance_to(pb) / AirportGrid.TILE)
 		var ext_cost := int(round(COST_RUNWAY_TILE * added))
 		if money < ext_cost:
-			add_log("Not enough cash — that extension costs %s." % money_str(ext_cost))
+			add_log("Not enough cash — that extension costs %s." % money_str(ext_cost), "muted")
 			return
 		grid.extend_runway_seg(extend_id, pb)
 		# Marked before the no-op check below: the segment was already restamped,
@@ -1646,7 +1937,7 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 	var tiles_used: float = pa.distance_to(pb) / AirportGrid.TILE + 1.0
 	var cost := int(round(COST_RUNWAY_TILE * tiles_used))
 	if money < cost:
-		add_log("Not enough cash — that runway costs %s." % money_str(cost))
+		add_log("Not enough cash — that runway costs %s." % money_str(cost), "muted")
 		return
 
 	money -= cost
@@ -1657,11 +1948,11 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 		add_log("Built Runway %s for %s — TOO SHORT (needs %s)." % [
 			grid.runway_name(runway), money_str(cost),
 			length_str(float(AirportGrid.MIN_RUNWAY_LEN)),
-		])
+		], "warning")
 	elif not grid.runway_is_usable(runway):
 		add_log("Built Runway %s for %s — no taxiway connection yet." % [
 			grid.runway_name(runway), money_str(cost),
-		])
+		], "warning")
 	else:
 		add_log("Built Runway %s (%s) for %s — takes %s." % [
 			grid.runway_name(runway), length_str(length), money_str(cost),
@@ -1693,6 +1984,10 @@ func tile_cost(type: int) -> int:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if setup_stage < 2:
+		return
+	# The confirmation dialog is modal. There is no input-blocking Control in
+	# this project; GameOverPanel gets by the same way a few lines below.
+	if confirm_pending:
 		return
 
 	# Save/load stay available after a shutdown so a bad run can be rolled back.
@@ -1772,16 +2067,16 @@ func _handle_select_click(pos: Vector2, cell: Vector2i) -> void:
 	var stand = grid.stand_at(cell)
 	if stand != null:
 		if stand["occupied"]:
-			add_log("Stand %d is occupied." % (stand["id"] + 1))
+			add_log("Stand %d is occupied." % (stand["id"] + 1), "muted")
 			return
 		if not grid.stand_is_connected(stand):
-			add_log("Stand %d has no taxiway connection." % (stand["id"] + 1))
+			add_log("Stand %d has no taxiway connection." % (stand["id"] + 1), "muted")
 			return
 		var p = find_plane(selected_plane_id)
 		if p == null:
 			add_log("Select a holding plane first.")
 		elif p["state"] != "HOLDING":
-			add_log("%s is not holding for a stand." % p["callsign"])
+			add_log("%s is not holding for a stand." % p["callsign"], "muted")
 		else:
 			assign_stand_manual(p, stand)
 			selected_plane_id = -1
@@ -1822,7 +2117,7 @@ func _end_run() -> void:
 		+ "Total earned:    %s" % money_str(earned)
 	)
 	$UI/GameOverPanel.visible = true
-	add_log("GAME OVER — reputation hit zero after %d:%02d." % [minutes, seconds])
+	add_log("GAME OVER — reputation hit zero after %d:%02d." % [minutes, seconds], "critical")
 
 
 # The narrowest link in the chain from approach to stand: airborne slots,
@@ -1892,7 +2187,7 @@ func _simulate(dt: float) -> void:
 func save_game() -> void:
 	# Saving a shut-down airport would just reload straight back into game over.
 	if game_over:
-		add_log("Can't save a shut-down airport.")
+		add_log("Can't save a shut-down airport.", "muted")
 		return
 	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if f == null:
@@ -1938,6 +2233,9 @@ func load_game() -> void:
 	selected_plane_id = -1
 	grid.from_dict(d["grid"])
 	render3d.mark_layout_dirty()
+	# A restored game starts with nothing uncommitted, whatever was pending when
+	# the save was written.
+	pause_ledger.clear()
 
 	money = d["money"]
 	reputation = d["reputation"]
@@ -2130,6 +2428,10 @@ func _update_hud() -> void:
 		rep_label.modulate = Color.WHITE
 	var clock := "PAUSED" if paused else "%dx" % int(speed)
 	next_in_label.text = "Next flight in: %.1fs   [%s]" % [max(0.0, next_spawn_at - time_elapsed), clock]
+	# While paused, show what is still undoable — it is the whole point of the
+	# pause window, and it disappears the moment time resumes.
+	if paused and not pause_ledger.is_empty():
+		next_in_label.text += "   ·   %s uncommitted" % money_str(pause_spend_total())
 
 	var usable_runways := 0
 	for r in grid.runways:
@@ -2158,7 +2460,7 @@ func _update_hud() -> void:
 	match tool:
 		Tool.SELECT:
 			hint_label.text = "SELECT — click a plane to see its route,\nthen click a free stand to assign it."
-			tool_info_label.text = "Demolish refunds %d%%" % int(REFUND_RATE * 100)
+			tool_info_label.text = "Demolish costs %s per tile" % money_str(COST_DEMOLISH_TILE)
 		Tool.TAXIWAY:
 			hint_label.text = "TAXIWAY — click or drag to paint.\nStands and runways need a taxiway connection."
 			tool_info_label.text = "%s per tile" % money_str(COST_TAXIWAY)
@@ -2205,8 +2507,8 @@ func _update_hud() -> void:
 			hint_label.text = "CAR PARK — click to build beside a road.\nAdds passenger capacity."
 			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_PARKING_TILE), PARK_UNITS_PER_TILE]
 		Tool.DEMOLISH:
-			hint_label.text = "DEMOLISH — click to remove.\nOccupied stands and runways can't be removed."
-			tool_info_label.text = "Refunds %d%%" % int(REFUND_RATE * 100)
+			hint_label.text = "DEMOLISH — costs %s per tile, no refund.\nWhile paused, anything you just built undoes in full." % money_str(COST_DEMOLISH_TILE)
+			tool_info_label.text = "%s per tile — no refund" % money_str(COST_DEMOLISH_TILE)
 		Tool.LAND:
 			hint_label.text = "BUY LAND — click a marked tract to buy it.\nNothing can be built on land you don't own."
 			var hovered := grid.tract_at(hover_cell)

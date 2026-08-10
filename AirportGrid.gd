@@ -116,6 +116,30 @@ func buy_tract(i: int) -> void:
 	_landside_dirty = true
 
 
+# Which owned parcel a cell falls in, or -1. The mirror of tract_at(), which only
+# reports parcels still for sale.
+func owned_tract_at(c: Vector2i) -> int:
+	for i in owned_tracts:
+		if (TRACTS[i] as Rect2i).has_point(c):
+			return i
+	return -1
+
+
+# Releasing a parcel is only safe while it is still bare: anything built on it
+# would otherwise be left standing on land the airport no longer owns.
+func tract_is_bare(i: int) -> bool:
+	var r: Rect2i = TRACTS[i]
+	for c in tiles:
+		if r.has_point(c):
+			return false
+	return true
+
+
+func sell_tract(i: int) -> void:
+	owned_tracts.erase(i)
+	_landside_dirty = true
+
+
 # Bounding box of everything owned, in cells. The camera frames this rather than
 # the whole grid, so buying land widens the view instead of the player starting
 # zoomed out over land they do not own.
