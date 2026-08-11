@@ -955,15 +955,15 @@ func _build_tower() -> void:
 	_tower_root.add_child(model)
 
 
-# The nearest empty tile to the apron that the tower can stand on. Scored rather
-# than filtered, so the search always returns something: a tile standing clear of
-# everything wins, then one merely off the movement area, then any empty tile at
-# all on a crowded field.
+# The nearest empty tile to the middle of the movement area that the tower can
+# stand on. Scored rather than filtered, so the search always returns something:
+# a tile clear of buildings wins, and on a field with no room left it will still
+# take one that is not.
 #
 # Rerun on every layout rebuild, so building over its spot moves it rather than
 # leaving a tower standing inside a new taxiway.
 func _tower_site() -> Vector2i:
-	var focus := _apron_focus()
+	var focus := _field_focus()
 	var best := AirportGrid.NOWHERE
 	var best_score := INF
 	var b: Rect2i = grid.owned_bounds()
@@ -983,38 +983,40 @@ func _tower_site() -> Vector2i:
 	return best
 
 
-# 0 stands free on all four sides — the tower is a landmark and its base spills
-# past its own tile, so touching the terminal made it look like a rooftop mast.
-# 1 is merely off the taxiways and runways. 2 is anywhere it fits at all.
+# What the tower must stand clear of is *buildings*: against the terminal it read
+# as a mast on the roof, and its base spills past its own tile at this scale, so
+# it would foul a stand. Taxiways and runways are explicitly not on that list —
+# standing over them is the entire job, and an infield site between the apron and
+# the parallel taxiway is where a real tower goes.
 func _tower_penalty(c: Vector2i) -> int:
-	var touches_movement := false
-	var touches_anything := false
 	for n in grid.neighbors(c):
 		# Annotated, not inferred: `grid` is untyped, so this returns Variant and
 		# `:=` fails the "inferred from Variant" check.
 		var t: int = grid.tile_type(n)
-		if t == AirportGrid.TileType.EMPTY:
-			continue
-		touches_anything = true
-		if t == AirportGrid.TileType.TAXIWAY or t == AirportGrid.TileType.RUNWAY:
-			touches_movement = true
-	if touches_movement:
-		return 2
-	return 1 if touches_anything else 0
+		if t == AirportGrid.TileType.TERMINAL or t == AirportGrid.TileType.STAND \
+				or t == AirportGrid.TileType.ROAD or t == AirportGrid.TileType.PARKING:
+			return 1
+	return 0
 
 
-# Controllers watch the apron, so that is what the tower sits beside: the stands
-# if there are any, else the concourse, else the middle of what is owned.
-func _apron_focus() -> Vector2i:
+# Controllers need sightlines over the movement area, so the tower is drawn to
+# the middle of *that* — runways and taxiways — rather than to the terminal it
+# used to hug. On the starter layout this lands it in the infield between the
+# apron taxiway and the parallel taxiway, out among the runways where a real one
+# stands, instead of tucked against the concourse.
+#
+# Stands, then owned land, are only fallbacks for a field with no pavement yet.
+func _field_focus() -> Vector2i:
 	var sum := Vector2.ZERO
 	var n := 0
-	for g in grid.stands:
-		for c in g["cells"]:
+	for c in grid.tiles:
+		var t: int = grid.tile_type(c)
+		if t == AirportGrid.TileType.TAXIWAY or t == AirportGrid.TileType.RUNWAY:
 			sum += Vector2(c)
 			n += 1
 	if n == 0:
-		for c in grid.tiles:
-			if grid.tile_type(c) == AirportGrid.TileType.TERMINAL:
+		for g in grid.stands:
+			for c in g["cells"]:
 				sum += Vector2(c)
 				n += 1
 	if n == 0:
