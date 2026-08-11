@@ -1086,13 +1086,17 @@ func seed_starter_airport() -> void:
 	# the other, which is what a nose-in stand requires — an aircraft parked
 	# facing the pier reverses straight back, and there has to be something to
 	# reverse onto. Stands backing onto grass was the visible symptom.
-	# The lanes are two cells, not one. A single-cell lane serving two stands is
-	# a cul-de-sac and cost 6 gridlocks a run — two aircraft wanting stands off
-	# the same lane have nowhere to pass. Two cells is also what a real taxilane
-	# alongside a pier is, and now that the pavement is drawn narrower than its
-	# tile it reads as a lane and its shoulder rather than as a slab.
-	for y in range(3, 7):
-		for x in [8, 9, 15, 16]:
-			place_taxiway(Vector2i(x, y))
-	for anchor in [Vector2i(10, 3), Vector2i(10, 5), Vector2i(13, 3), Vector2i(13, 5)]:
+	# One stand per flank, each with its own single-cell lane straight out to the
+	# apron. What made the lanes two cells wide before was two stands sharing
+	# one: that is a cul-de-sac, and two aircraft wanting stands off it have
+	# nowhere to pass — 6 gridlocks a run, measured twice. A lane serving a
+	# single stand has no such contention, so the pavement behind the stands
+	# drops from sixteen cells to four.
+	#
+	# The starter therefore opens with two stands rather than four. The player
+	# can add more, but doing so means adding the passing room to go with them.
+	for y in [5, 6]:
+		place_taxiway(Vector2i(9, y))
+		place_taxiway(Vector2i(15, y))
+	for anchor in [Vector2i(10, 5), Vector2i(13, 5)]:
 		place_stand(stand_cells_for(anchor, 0), 0)
