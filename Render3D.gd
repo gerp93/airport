@@ -641,12 +641,16 @@ func _cylinder(p: Vector2, radius: float, height: float, mat: Material) -> void:
 # same convention runway designators use), and because it is real ground geometry
 # rather than a HUD widget it stays truthful as the camera rotates.
 #
-# Painted inside the field rather than out on the surround: outside it sits
-# beyond the camera's default framing and is simply never seen. It is only a
-# ground marking, so building over it is harmless.
+# Sits on the surround just off the north-west corner, clear of every buildable
+# tile. It was briefly painted inside the field, which put a permanent decal on
+# land the player is meant to build on.
 func _build_compass() -> void:
 	var r: Rect2 = grid.grid_rect()
-	var c := r.position + Vector2(AirportGrid.TILE * 2.2, AirportGrid.TILE * 2.2)
+	# West of x=0, so it is outside every tract the player can ever own. Offset
+	# down rather than diagonally out: in this projection an offset along the
+	# north-west diagonal pushes past the camera's framing and is never seen,
+	# whereas a due-west one stays at the same screen depth.
+	var c := Vector2(r.position.x - AirportGrid.TILE * 2.2, r.position.y + AirportGrid.TILE * 3.0)
 	var ink := _mat("compass", Color(0.93, 0.95, 0.93, 0.85), true)
 
 	var ring := TorusMesh.new()

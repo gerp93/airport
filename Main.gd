@@ -2008,6 +2008,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			if move_toward_point(p, start_end, taxi_speed(), dt):
 				p["state"] = "DEPARTING"
 				p["state_timer"] = 0.0
+				p["roll_start"] = p["pos"]
 
 		"DEPARTING":
 			var runway = grid.get_runway(p["runway_id"])
@@ -2015,16 +2016,27 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				tow(p, "runway removed during takeoff")
 				return
 			var roll_to: Vector2 = runway["a"] if p.get("dep_from_b", false) else runway["b"]
-			if move_toward_point(p, roll_to, TAKEOFF_SPEED, dt):
+			var at_end := move_toward_point(p, roll_to, TAKEOFF_SPEED, dt)
+			# Rotate once the aircraft has used the pavement its class actually
+			# needs, rather than running to the far end every time. A regional on
+			# a 9,600ft runway should be airborne well before the end of it.
+			var rolled: float = p["pos"].distance_to(p.get("roll_start", p["pos"]))
+			var need: float = required_runway(p) * AirportGrid.TILE
+			var strip: float = (runway["a"] as Vector2).distance_to(runway["b"])
+			if at_end or rolled >= minf(need, strip * 0.92):
 				runway["occupied"] = false
 				p["runway_id"] = -1
 				p["state"] = "CLIMB_OUT"
 				p["state_timer"] = 0.0
+				p["liftoff_pos"] = p["pos"]
 
 		"CLIMB_OUT":
 			var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
 			p["pos"] = p["pos"] + fwd * TAKEOFF_SPEED * dt
-			if not get_viewport_rect().grow(120.0).has_point(p["pos"]):
+			# Bounds are the world, not the window. This used to test the
+			# viewport rect, which was the same thing only while the game was
+			# top-down 2D with a fixed camera.
+			if not grid.grid_rect().grow(260.0).has_point(p["pos"]):
 				add_log("%s departed." % p["callsign"])
 				p["state"] = "REMOVE"
 
@@ -2830,13 +2842,51 @@ func _sync_world() -> void:
 # Altitude is a rendering concern only — the simulation is still purely 2D, and
 # deliberately so. Heights are eased rather than snapped so an aircraft rolling
 # out of LANDING doesn't drop through the runway in a single frame.
-const RENDER_ALT := {
-	"AIR_HOLD": 150.0, "APPROACH": 108.0, "INBOUND": 62.0, "CLIMB_OUT": 96.0,
-}
+const ALT_HOLD := 150.0
+const ALT_APPROACH := 108.0
+const ALT_CLIMB := 150.0
+# Distance over which the glideslope descends. Matches the lineup point APPROACH
+# flies to, so height reaches zero exactly on the threshold markings.
+const GLIDE_LEN := 220.0
+const CLIMB_GRADIENT := 0.26
 
 
+# Altitude is derived from POSITION on approach and departure, not from a
+# per-state constant. With constants an aircraft flew the whole approach at a
+# fixed height and then dropped after touchdown — and because height displaces a
+# sprite up-and-right in an isometric view, that made it look like it was landing
+# on the taxiway alongside the runway rather than on the runway.
 func _altitude_of(p: Dictionary, dt: float) -> float:
-	var target: float = float(RENDER_ALT.get(p["state"], 0.0))
+	var target := 0.0
+	var continuous := true
+
+	match p["state"]:
+		"AIR_HOLD":
+			target = ALT_HOLD
+			continuous = false
+		"APPROACH":
+			target = ALT_APPROACH
+			continuous = false
+		"INBOUND":
+			# Glideslope: full height at the lineup point, wheels on the numbers.
+			var r = grid.get_runway(p["runway_id"])
+			if r != null:
+				var d: float = p["pos"].distance_to(grid.runway_threshold_point(r))
+				target = ALT_APPROACH * clampf(d / GLIDE_LEN, 0.0, 1.0)
+			else:
+				target = ALT_APPROACH
+		"CLIMB_OUT":
+			# Climb away on a gradient from wherever it rotated, rather than
+			# snapping to cruise the instant the wheels leave the ground.
+			var lift: Vector2 = p.get("liftoff_pos", p["pos"])
+			target = minf(ALT_CLIMB, p["pos"].distance_to(lift) * CLIMB_GRADIENT)
+
+	# Position-derived heights are already smooth, and easing them would let the
+	# aircraft float above the runway during the flare. Only the state-to-state
+	# steps get eased.
+	if continuous:
+		p["_render_alt"] = target
+		return target
 	var cur: float = float(p.get("_render_alt", target))
 	var eased: float = cur + (target - cur) * minf(1.0, dt * 2.2)
 	p["_render_alt"] = eased
