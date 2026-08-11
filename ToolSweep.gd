@@ -104,59 +104,89 @@ func _check_land(main) -> void:
 # rather than assuming an axis, so this guards that they stay that way.
 func _check_rotation(main) -> void:
 	var grid = main.grid
-	var anchor := Vector2i(3, 3)
+	var AG = load("res://AirportGrid.gd")
 
-	var cells: Array = grid.stand_cells_for(anchor, 2, 1)
-	_expect(cells.size() == 2, "a widebody stand must be two cells")
-	_expect(cells[1] == anchor + Vector2i(0, 1), "rot 1 must run north-south")
-	_expect(grid.stand_cells_for(anchor, 2, 0)[1] == anchor + Vector2i(1, 0),
-		"rot 0 must run east-west")
+	# The hall is 6x2; rotating it swaps the axes.
+	var flat: Array = grid.building_cells(Vector2i(22, 1), AG.TERMINAL_SIZE, 0)
+	var tall: Array = grid.building_cells(Vector2i(22, 1), AG.TERMINAL_SIZE, 1)
+	_expect(flat.size() == 12 and tall.size() == 12, "a terminal is 12 cells either way")
+	_expect(flat.has(Vector2i(27, 2)) and not flat.has(Vector2i(23, 6)),
+		"rot 0 must lay the hall east-west")
+	_expect(tall.has(Vector2i(23, 6)) and not tall.has(Vector2i(27, 2)),
+		"rot 1 must lay the hall north-south")
 
-	_expect(grid.can_place_stand(cells), "a rotated stand must be placeable")
-	var id: int = grid.place_stand(cells, 2)
-	var stand = grid.get_stand(id)
-	_expect(not grid.stand_is_connected(stand), "no taxiway yet, so not connected")
+	# A stand is square, so rotation moves the jet bridge, never the footprint.
+	_expect(grid.stand_cells_for(Vector2i(22, 1), 0) == grid.stand_cells_for(Vector2i(22, 1), 1),
+		"a square stand occupies the same cells at either rotation")
 
-	# Touch only the *second* cell, which an east-west assumption would miss.
-	grid.place_taxiway(anchor + Vector2i(1, 1))
-	_expect(grid.stand_is_connected(stand), "a taxiway on either cell must connect it")
-	_expect(grid.stand_park_cell(stand) == anchor + Vector2i(0, 1),
-		"the parking cell must be the one touching the taxiway")
+	_expect(grid.can_place_terminal(flat), "a terminal must be placeable on clear ground")
+	var tid: int = grid.place_terminal(flat, 0)
+	_expect(grid.get_terminal(tid) != null, "a placed terminal must be findable")
+	_expect(not grid.terminal_is_roaded(grid.get_terminal(tid)),
+		"a terminal with no road must not count as roaded")
 
-	grid.place_terminal(anchor + Vector2i(-1, 1))
-	_expect(grid.stand_is_contact(stand), "a concourse alongside must give it a bridge")
+	# A pier has to meet a hall end-on; floating in a field is not a concourse.
+	var loose: Array = grid.building_cells(Vector2i(22, 8), AG.CONCOURSE_SIZE, 0)
+	_expect(not grid.can_place_concourse(loose), "a concourse must touch a terminal")
+	var joined: Array = grid.building_cells(Vector2i(24, 3), AG.CONCOURSE_SIZE, 0)
+	_expect(grid.can_place_concourse(joined), "a concourse touching the hall end-on must place")
+	var cid: int = grid.place_concourse(joined, 0)
+	_expect(grid.get_concourse(cid)["terminal_id"] == tid,
+		"a concourse must record the terminal it hangs off")
+	_expect(grid.get_concourse(cid)["cells"][0] == Vector2i(24, 3),
+		"a concourse must be stored root-first, from the end that meets the hall")
+
+	# Stands attach to the PIER, not to the hall.
+	var by_pier = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(25, 4), 0), 0))
+	_expect(grid.stand_is_contact(by_pier), "a stand against a pier is a contact stand")
+	# Clear of the pier as well as the hall, or it would be a contact stand for
+	# the wrong reason and the check would pass by accident.
+	var by_hall = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(20, 3), 0), 0))
+	_expect(not grid.stand_is_contact(by_hall),
+		"a stand against the hall itself must NOT get a bridge")
+
+	# Demolishing the hall orphans its piers rather than destroying them.
+	grid.demolish(Vector2i(22, 1))
+	_expect(grid.get_terminal(tid) == null, "demolishing must remove the whole hall")
+	_expect(grid.tile_type(Vector2i(27, 2)) == AG.TileType.EMPTY,
+		"demolishing a hall must clear every one of its cells")
+	_expect(grid.get_concourse(cid)["terminal_id"] == -1,
+		"a pier whose hall is gone must be orphaned, not deleted")
+	grid.demolish(Vector2i(24, 3))
+	grid.demolish(Vector2i(25, 4))
+	grid.demolish(Vector2i(20, 3))
 
 
 # Parked aircraft face where the stand says, not where they happened to be
 # driving. The case that matters is a stand entered from the side: the taxiway
-# and the concourse then disagree, and the concourse has to win or the aircraft
-# sits broadside to its own jet bridge.
+# and the pier then disagree, and the pier has to win or the aircraft sits
+# broadside to its own jet bridge.
 func _check_park_heading(main) -> void:
 	var grid = main.grid
 
-	# Contact stand: taxiway to the east, concourse to the north.
-	var cells: Array = grid.stand_cells_for(Vector2i(6, 3), 2, 1)
-	var contact = grid.get_stand(grid.place_stand(cells, 2))
-	grid.place_taxiway(Vector2i(7, 3))
-	grid.place_terminal(Vector2i(6, 2))
+	var AG = load("res://AirportGrid.gd")
+	# A hall standing on end, with a pier running west off it, and a stand tucked
+	# under the pier with its taxiway to the EAST — so the two disagree and the
+	# pier has to win.
+	grid.place_terminal(grid.building_cells(Vector2i(25, 8), AG.TERMINAL_SIZE, 1), 1)
+	grid.place_concourse(grid.building_cells(Vector2i(21, 11), AG.CONCOURSE_SIZE, 1), 1)
+	var contact = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(22, 12), 0), 0))
+	grid.place_taxiway(Vector2i(24, 12))
 	_expect(_same_angle(grid.stand_park_heading(contact), -PI / 2.0),
-		"a contact stand must point its aircraft at the concourse, not away from the taxiway")
+		"a contact stand must point its aircraft at the pier, not away from the taxiway")
 
-	# A widebody parks across both tiles, not on the one the taxi route ended on.
+	# The aircraft parks in the middle of the whole stand, not on the park cell.
 	var mid: Vector2 = grid.stand_park_point(contact)
 	_expect(mid != grid.cell_to_world(grid.stand_park_cell(contact)),
-		"a two-tile stand must park its aircraft off the park cell, between both tiles")
-	_expect(mid == (grid.cell_to_world(Vector2i(6, 3)) + grid.cell_to_world(Vector2i(6, 4))) * 0.5,
+		"a 2x2 stand must park its aircraft off the park cell, in the middle")
+	_expect(mid == (grid.cell_to_world(Vector2i(22, 12)) + grid.cell_to_world(Vector2i(23, 13))) * 0.5,
 		"the park point must be the centre of the stand")
-	var single = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(6, 6), 1), 1))
-	_expect(grid.stand_park_point(single) == grid.cell_to_world(Vector2i(6, 6)),
-		"a one-tile stand's park point must still be its own centre")
 
 	# Remote stand: nothing to face, so it points back out along the taxiway.
-	var remote = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(9, 3), 1), 1))
+	var remote = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(26, 16), 0), 0))
 	_expect(is_nan(grid.stand_park_heading(remote)),
 		"an unconnected stand must not claim a heading")
-	grid.place_taxiway(Vector2i(10, 3))
+	grid.place_taxiway(Vector2i(28, 16))
 	_expect(_same_angle(grid.stand_park_heading(remote), PI),
 		"a remote stand must point away from its taxiway")
 
@@ -168,26 +198,26 @@ func _check_stand_routing(main) -> void:
 	var grid = main.grid
 	# A taxiway, a stand beside it, and a second taxiway on the far side, so the
 	# stand sits on the short route between the two.
-	grid.place_taxiway(Vector2i(15, 2))
-	grid.place_stand(grid.stand_cells_for(Vector2i(15, 3), 1), 1)
-	grid.place_taxiway(Vector2i(15, 4))
+	grid.place_taxiway(Vector2i(18, 14))
+	grid.place_stand(grid.stand_cells_for(Vector2i(18, 15), 0), 0)
+	grid.place_taxiway(Vector2i(18, 17))
 
-	var through: Array = grid.find_path(Vector2i(15, 2), Vector2i(15, 4))
-	_expect(not through.has(Vector2i(15, 3)),
+	var through: Array = grid.find_path(Vector2i(18, 14), Vector2i(18, 17))
+	_expect(not through.has(Vector2i(18, 15)),
 		"a route between two taxiways must not cut across the stand between them")
 
 	# ...but the stand itself is still reachable, and still leavable.
-	var onto: Array = grid.find_path(Vector2i(15, 2), Vector2i(15, 3))
-	_expect(onto.size() >= 2 and onto[onto.size() - 1] == Vector2i(15, 3),
+	var onto: Array = grid.find_path(Vector2i(18, 14), Vector2i(18, 15))
+	_expect(onto.size() >= 2 and onto[onto.size() - 1] == Vector2i(18, 15),
 		"an aircraft must still be able to taxi onto its own stand")
-	var off: Array = grid.find_path(Vector2i(15, 3), Vector2i(15, 2))
+	var off: Array = grid.find_path(Vector2i(18, 15), Vector2i(18, 14))
 	_expect(off.size() >= 2, "an aircraft must still be able to push back off its stand")
 
 	# Two stands touching: neither may be a doorway to the other.
-	grid.place_stand(grid.stand_cells_for(Vector2i(16, 3), 1), 1)
-	grid.place_taxiway(Vector2i(16, 2))
-	var hop: Array = grid.find_path(Vector2i(15, 3), Vector2i(16, 3))
+	grid.place_stand(grid.stand_cells_for(Vector2i(20, 15), 0), 0)
+	var hop: Array = grid.find_path(Vector2i(18, 15), Vector2i(20, 15))
 	_expect(hop.is_empty(), "there must be no route at all from one stand to another")
+
 
 
 func _same_angle(a: float, b: float) -> bool:

@@ -7,18 +7,18 @@ const Render3D = preload("res://Render3D.gd")
 
 const UPDATE_REPO := "gerp93/airport"
 
-enum Tool { SELECT, TAXIWAY, RUNWAY, STAND_SMALL, STAND_LARGE, TERMINAL, ROAD, PARKING, DEMOLISH, LAND }
+enum Tool { SELECT, TAXIWAY, RUNWAY, STAND, TERMINAL, CONCOURSE, ROAD, PARKING, DEMOLISH, LAND }
 
 const TOOL_BUTTONS := {
 	Tool.SELECT: "SelectBtn", Tool.TAXIWAY: "TaxiwayBtn", Tool.RUNWAY: "RunwayBtn",
-	Tool.STAND_SMALL: "StandSmallBtn", Tool.STAND_LARGE: "StandLargeBtn",
-	Tool.TERMINAL: "TerminalBtn", Tool.ROAD: "RoadBtn",
+	Tool.STAND: "StandBtn", Tool.TERMINAL: "TerminalBtn",
+	Tool.CONCOURSE: "ConcourseBtn", Tool.ROAD: "RoadBtn",
 	Tool.PARKING: "ParkingBtn", Tool.DEMOLISH: "DemolishBtn",
 	Tool.LAND: "LandBtn",
 }
 const TOOL_KEYS := {
 	KEY_ESCAPE: Tool.SELECT, KEY_T: Tool.TAXIWAY, KEY_R: Tool.RUNWAY,
-	KEY_G: Tool.STAND_SMALL, KEY_H: Tool.STAND_LARGE, KEY_E: Tool.TERMINAL,
+	KEY_G: Tool.STAND, KEY_E: Tool.TERMINAL, KEY_C: Tool.CONCOURSE,
 	KEY_O: Tool.ROAD, KEY_P: Tool.PARKING, KEY_X: Tool.DEMOLISH,
 	KEY_L: Tool.LAND,
 }
@@ -32,17 +32,17 @@ const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
 # regional jet is both realistic and worth serving.
 const CLASSES := [
 	{
-		"name": "Regional", "code": "R", "min_runway": 6, "stand_size": 1,
+		"name": "Regional", "code": "R", "min_runway": 6,
 		"fee_min": 700, "fee_max": 1_100, "turnaround": 4.0, "scale": 0.7,
 		"term_units": 1,
 	},
 	{
-		"name": "Narrowbody", "code": "N", "min_runway": 12, "stand_size": 1,
+		"name": "Narrowbody", "code": "N", "min_runway": 12,
 		"fee_min": 1_900, "fee_max": 2_900, "turnaround": 8.0, "scale": 1.0,
 		"term_units": 2,
 	},
 	{
-		"name": "Widebody", "code": "W", "min_runway": 18, "stand_size": 2,
+		"name": "Widebody", "code": "W", "min_runway": 18,
 		"fee_min": 6_500, "fee_max": 9_500, "turnaround": 13.0, "scale": 1.35,
 		"term_units": 3,
 	},
@@ -70,7 +70,10 @@ const REVENUE_SCALE := 40
 
 const COST_TAXIWAY := 500_000
 const COST_RUNWAY_TILE := 1_500_000
-const COST_STAND_TILE := 4_500_000
+# A stand is a fixed 2x2 — the stand mesh's own footprint — and takes any
+# aircraft. Priced as the old widebody stand did (2 tiles at $4.5M), since that
+# is now the only kind there is.
+const COST_STAND := 9_000_000
 # Facilities are equipment and can be sold on; buildings cannot. Selling a
 # facility still recovers this share, but DEMOLITION never refunds anything —
 # see COST_DEMOLISH_TILE.
@@ -145,9 +148,17 @@ const START_FACILITIES := {"tower": 1, "crew": 1, "fuel": 1, "mech": 0}
 # stands it serves. This is the most compressed capital figure in the model:
 # a real terminal runs into the hundreds of millions and would swamp
 # everything else at this revenue scale.
-const COST_TERMINAL_TILE := 18_000_000
-const UPKEEP_TERMINAL_TILE := 6_000
-const TERM_UNITS_PER_TILE := 3
+# A terminal is a 6x2 hall and a concourse a 1x4 pier — both fixed-size, because
+# both are single authored meshes. Priced per building rather than per tile, and
+# deliberately set so the starter airport's economy lands where the old
+# three-tile concourse did: the hall's 12 tiles at 1 unit each give 12 passenger
+# units against the 9 the old layout nominally had (and the 3 it actually had,
+# since two of its three tiles were never road-served).
+const COST_TERMINAL := 54_000_000
+const UPKEEP_TERMINAL := 18_000
+const TERM_UNITS_PER_TILE := 1
+const COST_CONCOURSE := 18_000_000
+const UPKEEP_CONCOURSE := 6_000
 # Landside: passengers arrive by road and have to leave their cars somewhere.
 # Raw land, priced per tile so a bigger parcel costs more. Cheap against what
 # gets built on it — the stand is that a tract is a lump sum you commit up front,
@@ -338,9 +349,9 @@ func _ready() -> void:
 	$UI/SelectBtn.pressed.connect(_set_tool.bind(Tool.SELECT))
 	$UI/TaxiwayBtn.pressed.connect(_set_tool.bind(Tool.TAXIWAY))
 	$UI/RunwayBtn.pressed.connect(_set_tool.bind(Tool.RUNWAY))
-	$UI/StandSmallBtn.pressed.connect(_set_tool.bind(Tool.STAND_SMALL))
-	$UI/StandLargeBtn.pressed.connect(_set_tool.bind(Tool.STAND_LARGE))
+	$UI/StandBtn.pressed.connect(_set_tool.bind(Tool.STAND))
 	$UI/TerminalBtn.pressed.connect(_set_tool.bind(Tool.TERMINAL))
+	$UI/ConcourseBtn.pressed.connect(_set_tool.bind(Tool.CONCOURSE))
 	$UI/RoadBtn.pressed.connect(_set_tool.bind(Tool.ROAD))
 	$UI/ParkingBtn.pressed.connect(_set_tool.bind(Tool.PARKING))
 	$UI/DemolishBtn.pressed.connect(_set_tool.bind(Tool.DEMOLISH))
@@ -553,8 +564,8 @@ func _layout_bottom_bar(vp: Vector2, m: float, bar_y: float, info_y: float,
 	var right := [$UI/PauseBtn, $UI/Speed1Btn, $UI/Speed2Btn, $UI/Speed3Btn]
 	var right_w := 76.0 + 3.0 * 60.0 + 3.0 * 6.0
 	var left_tools := [
-		$UI/SelectBtn, $UI/TaxiwayBtn, $UI/RunwayBtn, $UI/StandSmallBtn,
-		$UI/StandLargeBtn, $UI/TerminalBtn, $UI/RoadBtn, $UI/ParkingBtn,
+		$UI/SelectBtn, $UI/TaxiwayBtn, $UI/RunwayBtn, $UI/StandBtn,
+		$UI/TerminalBtn, $UI/ConcourseBtn, $UI/RoadBtn, $UI/ParkingBtn,
 		$UI/DemolishBtn, $UI/LandBtn, $UI/HelpBtn,
 	]
 	var n := float(left_tools.size())
@@ -1128,6 +1139,20 @@ func _ledger_take_cells(cells: Array) -> int:
 	return -1
 
 
+func _do_place_terminal(cells: Array, rot: int) -> void:
+	if money < COST_TERMINAL or not grid.can_place_terminal(cells):
+		return
+	_spend(COST_TERMINAL, "tile", {"cells": cells.duplicate()})
+	var id := grid.place_terminal(cells, rot)
+	add_log("Built Terminal %d for %s — passenger capacity now %d." % [
+		id + 1, money_str(COST_TERMINAL), capacity("term"),
+	], "build")
+	var t = grid.get_terminal(id)
+	if t != null and not grid.terminal_is_roaded(t):
+		add_log("That terminal has no road access — it handles no passengers.", "warning")
+	render3d.mark_layout_dirty()
+
+
 func _do_buy_tract(tract: int) -> void:
 	var land_cost := grid.tract_tiles(tract) * COST_LAND_TILE
 	if money < land_cost:
@@ -1424,11 +1449,13 @@ func fac_def(key: String) -> Dictionary:
 
 func capacity(key: String) -> int:
 	if key == "term":
-		# Only concourse and parking that a road actually reaches can handle
-		# passengers, so landside access is a real constraint.
-		var conc := grid.count_tiles(AirportGrid.TileType.TERMINAL, true)
+		# The HALL processes passengers, and only one a road actually reaches, so
+		# landside access is a real constraint. Concourse piers add no capacity of
+		# their own — what they add is jet bridges, by being what a stand can
+		# touch.
+		var hall := grid.terminal_tile_count(true)
 		var park := grid.count_tiles(AirportGrid.TileType.PARKING, true)
-		return conc * TERM_UNITS_PER_TILE + park * PARK_UNITS_PER_TILE
+		return hall * TERM_UNITS_PER_TILE + park * PARK_UNITS_PER_TILE
 	return facilities.get(key, 0) * int(fac_def(key)["per_unit"])
 
 
@@ -1441,7 +1468,8 @@ func total_upkeep() -> int:
 	for f in FACILITIES:
 		total += int(facilities.get(f["key"], 0)) * int(f["upkeep"])
 	total += grid.runways.size() * UPKEEP_RUNWAY
-	total += grid.terminal_tile_count() * UPKEEP_TERMINAL_TILE
+	total += grid.terminals.size() * UPKEEP_TERMINAL
+	total += grid.concourses.size() * UPKEEP_CONCOURSE
 	total += grid.count_tiles(AirportGrid.TileType.ROAD, false) * UPKEEP_ROAD_TILE
 	total += grid.count_tiles(AirportGrid.TileType.PARKING, false) * UPKEEP_PARKING_TILE
 	total += grid.stands.size() * UPKEEP_STAND
@@ -1534,7 +1562,7 @@ func try_start_service(p: Dictionary) -> bool:
 func service_shortfall(p: Dictionary) -> String:
 	var need_term: int = class_of(p)["term_units"]
 	if free_capacity("term") < need_term:
-		if grid.count_tiles(AirportGrid.TileType.TERMINAL, true) == 0:
+		if grid.count_tiles(AirportGrid.TileType.CONCOURSE, true) == 0:
 			return "no concourse with road access"
 		return "passenger capacity full"
 	if free_capacity("crew") < 1:
@@ -1653,7 +1681,7 @@ func can_handle_class(size: int) -> bool:
 	if not runway_ok:
 		return false
 	for g in grid.stands:
-		if grid.stand_is_connected(g) and g["size"] >= int(need["stand_size"]):
+		if grid.stand_is_connected(g):
 			return true
 	return false
 
@@ -2130,8 +2158,11 @@ func runway_fits(r: Dictionary, p: Dictionary) -> bool:
 	return grid.runway_length_tiles(r) >= required_runway(p)
 
 
-func stand_fits(g: Dictionary, p: Dictionary) -> bool:
-	return g["size"] >= class_of(p)["stand_size"]
+# Every stand takes every aircraft now, so the only question a stand answers is
+# whether it is connected. Kept as a named predicate rather than inlined: the
+# callers read as intent, and a size rule could come back.
+func stand_fits(_g: Dictionary, _p: Dictionary) -> bool:
+	return true
 
 
 func any_runway_fits(p: Dictionary) -> bool:
@@ -2527,37 +2558,50 @@ func apply_tool_at(cell: Vector2i) -> void:
 			_spend(COST_TAXIWAY, "tile", {"cells": [cell]})
 			grid.place_taxiway(cell)
 
-		Tool.STAND_SMALL, Tool.STAND_LARGE:
-			var size := tool_stand_size()
-			var cells := grid.stand_cells_for(cell, size, build_rot)
+		Tool.STAND:
+			var cells := grid.stand_cells_for(cell, build_rot)
 			if not grid.can_place_stand(cells):
 				return
-			var stand_cost: int = COST_STAND_TILE * size
-			if money < stand_cost:
-				add_log("Not enough cash for that stand (%s)." % money_str(stand_cost), "muted")
+			if money < COST_STAND:
+				add_log("Not enough cash for a stand (%s)." % money_str(COST_STAND), "muted")
 				return
-			_spend(stand_cost, "tile", {"cells": cells.duplicate()})
-			var id := grid.place_stand(cells, size)
-			var kind := "widebody stand" if size >= 2 else "stand"
+			_spend(COST_STAND, "tile", {"cells": cells.duplicate()})
+			var id := grid.place_stand(cells, build_rot)
 			var stand = grid.get_stand(id)
-			if grid.stand_is_connected(stand):
-				add_log("Built Stand %d (%s) for %s." % [id + 1, kind, money_str(stand_cost)])
-			else:
+			if not grid.stand_is_connected(stand):
 				add_log("Built Stand %d — NOT connected to a taxiway, no flights will use it." % (id + 1), "warning")
+			elif not grid.stand_is_contact(stand):
+				add_log("Built Stand %d for %s — remote, so passengers have to be bussed." % [
+					id + 1, money_str(COST_STAND),
+				])
+			else:
+				add_log("Built Stand %d for %s." % [id + 1, money_str(COST_STAND)])
 
 		Tool.TERMINAL:
-			if not grid.can_place_terminal(cell):
+			var tcells := grid.building_cells(cell, AirportGrid.TERMINAL_SIZE, build_rot)
+			if not grid.can_place_terminal(tcells):
 				return
-			if money < COST_TERMINAL_TILE:
-				add_log("Not enough cash for a concourse section (%s)." % money_str(COST_TERMINAL_TILE), "muted")
+			if money < COST_TERMINAL:
+				add_log("Not enough cash for a terminal (%s)." % money_str(COST_TERMINAL), "muted")
 				return
-			_spend(COST_TERMINAL_TILE, "tile", {"cells": [cell]})
-			grid.place_terminal(cell)
-			add_log("Built concourse section for %s — passenger capacity now %d." % [
-				money_str(COST_TERMINAL_TILE), capacity("term"),
-			])
-			if not grid.is_road_served(cell):
-				add_log("That concourse has no road access — it handles no passengers.", "warning")
+			if not paused:
+				_ask("Build a terminal hall for %s?\n\nConcourses attach to it at right angles, and stands attach to those." % money_str(COST_TERMINAL),
+					_do_place_terminal.bind(tcells, build_rot))
+				return
+			_do_place_terminal(tcells, build_rot)
+
+		Tool.CONCOURSE:
+			var ccells := grid.building_cells(cell, AirportGrid.CONCOURSE_SIZE, build_rot)
+			if not grid.can_place_concourse(ccells):
+				return
+			if money < COST_CONCOURSE:
+				add_log("Not enough cash for a concourse (%s)." % money_str(COST_CONCOURSE), "muted")
+				return
+			_spend(COST_CONCOURSE, "tile", {"cells": ccells.duplicate()})
+			var cid := grid.place_concourse(ccells, build_rot)
+			add_log("Built Concourse %d for %s — put stands down either flank." % [
+				cid + 1, money_str(COST_CONCOURSE),
+			], "build")
 
 		Tool.ROAD:
 			if not grid.can_place_road(cell):
@@ -2703,15 +2747,11 @@ func _rotate_build() -> void:
 
 
 func tool_is_rotatable() -> bool:
-	return tool == Tool.STAND_LARGE
+	return tool in [Tool.STAND, Tool.TERMINAL, Tool.CONCOURSE]
 
 
 func rot_name() -> String:
 	return "north-south" if build_rot == 1 else "east-west"
-
-
-func tool_stand_size() -> int:
-	return 2 if tool == Tool.STAND_LARGE else 1
 
 
 func tile_cost(type: int) -> int:
@@ -2721,9 +2761,9 @@ func tile_cost(type: int) -> int:
 		AirportGrid.TileType.RUNWAY:
 			return COST_RUNWAY_TILE
 		AirportGrid.TileType.STAND:
-			return COST_STAND_TILE
-		AirportGrid.TileType.TERMINAL:
-			return COST_TERMINAL_TILE
+			return COST_STAND
+		AirportGrid.TileType.CONCOURSE:
+			return COST_CONCOURSE
 		AirportGrid.TileType.ROAD:
 			return COST_ROAD_TILE
 		AirportGrid.TileType.PARKING:
@@ -3106,8 +3146,8 @@ func _update_ops_ui() -> void:
 	day_label.text = "Day %d · %ds to close%s" % [day, left, wx_txt]
 	day_label.modulate = Color(1.0, 0.72, 0.35) if not weather.is_empty() else Color.WHITE
 
-	var stranded := grid.count_tiles(AirportGrid.TileType.TERMINAL, false) \
-		- grid.count_tiles(AirportGrid.TileType.TERMINAL, true)
+	var stranded := grid.count_tiles(AirportGrid.TileType.CONCOURSE, false) \
+		- grid.count_tiles(AirportGrid.TileType.CONCOURSE, true)
 	var road_note := "" if stranded == 0 else "  !! %d concourse unroaded" % stranded
 	capacity_label.text = "Airborne %d/%d · Crew %d/%d · Fuel %d/%d\nPax %d/%d · Checks %d/%d\nUpkeep %s/day%s\nLast day: %s in, %s out" % [
 		airborne_count(), effective_air_capacity(),
@@ -3233,22 +3273,20 @@ func _update_hud() -> void:
 		if grid.runway_is_usable(r):
 			usable_runways += 1
 	var connected_stands := 0
-	var wide_stands := 0
+
 	var contact_stands := 0
 	for g in grid.stands:
 		if grid.stand_is_connected(g):
 			connected_stands += 1
-			if g["size"] >= 2:
-				wide_stands += 1
 			if grid.stand_is_contact(g):
 				contact_stands += 1
 	var longest := 0.0
 	for r in grid.runways:
 		if grid.runway_is_usable(r):
 			longest = maxf(longest, grid.runway_length_tiles(r))
-	stats_label.text = "Runways: %d (%d usable, longest %s → %s)\nStands: %d connected of %d (%d widebody, %d bridged)\nAircraft: %d\nServed: %d   Lost: %d" % [
+	stats_label.text = "Runways: %d (%d usable, longest %s → %s)\nStands: %d connected of %d (%d bridged)\nAircraft: %d\nServed: %d   Lost: %d" % [
 		grid.runways.size(), usable_runways, length_str(longest), _runway_capability(longest),
-		connected_stands, grid.stands.size(), wide_stands, contact_stands, planes.size(),
+		connected_stands, grid.stands.size(), contact_stands, planes.size(),
 		served, diverted,
 	]
 
@@ -3286,15 +3324,18 @@ func _update_hud() -> void:
 				tool_info_label.text = "%s%s · %s · %s · %s" % [prefix, length_str(total), heading, takes, money_str(cost)]
 			else:
 				tool_info_label.text = "%s per tile" % money_str(COST_RUNWAY_TILE)
-		Tool.STAND_SMALL:
-			hint_label.text = "STAND (small) — 1 tile, next to a taxiway.\nTakes Light and Narrowbody."
-			tool_info_label.text = money_str(COST_STAND_TILE)
-		Tool.STAND_LARGE:
-			hint_label.text = "STAND (widebody) — 2 tiles, laid %s.\nQ rotates. Takes any aircraft, including Widebody." % rot_name()
-			tool_info_label.text = "%s · %s (Q to rotate)" % [money_str(COST_STAND_TILE * 2), rot_name()]
+		Tool.STAND:
+			hint_label.text = "STAND — 2x2, beside a taxiway. Takes any aircraft.\nAgainst a concourse it gets a jet bridge."
+			tool_info_label.text = "%s · %s (Q to rotate)" % [money_str(COST_STAND), rot_name()]
 		Tool.TERMINAL:
-			hint_label.text = "CONCOURSE — click to build. Stands touching one\nget a jet bridge; the rest have to bus passengers."
-			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_TERMINAL_TILE), TERM_UNITS_PER_TILE]
+			hint_label.text = "TERMINAL — the 6x2 hall, laid %s. Needs a road.\nConcourses attach to it; stands attach to those." % rot_name()
+			tool_info_label.text = "%s · +%d pax units (Q to rotate)" % [
+				money_str(COST_TERMINAL),
+				AirportGrid.TERMINAL_SIZE.x * AirportGrid.TERMINAL_SIZE.y * TERM_UNITS_PER_TILE,
+			]
+		Tool.CONCOURSE:
+			hint_label.text = "CONCOURSE — a 1x4 pier, laid %s. Must meet a\nterminal end-on. Stands go down either flank." % rot_name()
+			tool_info_label.text = "%s · %s (Q to rotate)" % [money_str(COST_CONCOURSE), rot_name()]
 		Tool.ROAD:
 			hint_label.text = "ROAD — click or drag. Must reach the map edge\nto bring passengers in."
 			tool_info_label.text = "%s per tile" % money_str(COST_ROAD_TILE)
@@ -3468,15 +3509,18 @@ func _sync_ghost() -> void:
 		Tool.TAXIWAY:
 			ok = grid.can_place_taxiway(hover_cell) and money >= COST_TAXIWAY
 		Tool.TERMINAL:
-			ok = grid.can_place_terminal(hover_cell) and money >= COST_TERMINAL_TILE
+			cells = grid.building_cells(hover_cell, AirportGrid.TERMINAL_SIZE, build_rot)
+			ok = grid.can_place_terminal(cells) and money >= COST_TERMINAL
+		Tool.CONCOURSE:
+			cells = grid.building_cells(hover_cell, AirportGrid.CONCOURSE_SIZE, build_rot)
+			ok = grid.can_place_concourse(cells) and money >= COST_CONCOURSE
 		Tool.ROAD:
 			ok = grid.can_place_road(hover_cell) and money >= COST_ROAD_TILE
 		Tool.PARKING:
 			ok = grid.can_place_parking(hover_cell) and money >= COST_PARKING_TILE
-		Tool.STAND_SMALL, Tool.STAND_LARGE:
-			var size := tool_stand_size()
-			cells = grid.stand_cells_for(hover_cell, size, build_rot)
-			ok = grid.can_place_stand(cells) and money >= COST_STAND_TILE * size
+		Tool.STAND:
+			cells = grid.stand_cells_for(hover_cell, build_rot)
+			ok = grid.can_place_stand(cells) and money >= COST_STAND
 		Tool.DEMOLISH:
 			var preview := grid.demolish_preview(hover_cell)
 			ok = not preview.is_empty()
@@ -3588,7 +3632,7 @@ func _label_stand(g: Dictionary) -> void:
 		centre += grid.cell_to_world(c)
 	centre /= float(cells.size())
 
-	var tag := "S%d%s" % [g["id"] + 1, "·W" if g["size"] >= 2 else ""]
+	var tag := "S%d" % (g["id"] + 1)
 	var at: Vector2 = render3d.world_to_screen(centre, Render3D.H_STAND) + Vector2(-10, 4)
 	_plate_string(at, tag, 12, Color(0.95, 0.95, 0.95))
 	if not grid.stand_is_connected(g):

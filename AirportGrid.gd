@@ -2,7 +2,7 @@ extends RefCounted
 
 # NB: the ORDINAL is what gets serialized inside saved "tiles", so members may be
 # renamed but must never be reordered.
-enum TileType { EMPTY, TAXIWAY, RUNWAY, STAND, TERMINAL, ROAD, PARKING }
+enum TileType { EMPTY, TAXIWAY, RUNWAY, STAND, CONCOURSE, ROAD, PARKING, TERMINAL }
 
 # The grid is the whole world the airport could ever occupy. Only START_TRACT is
 # owned at the outset, and it is deliberately identical to the old fixed 32x18
@@ -34,6 +34,8 @@ var tiles := {}
 var claims := {}
 var runways: Array = []
 var stands: Array = []
+var terminals: Array = []
+var concourses: Array = []
 # Indices into TRACTS that have been bought. START_TRACT is always owned and is
 # not in this set.
 var owned_tracts := {}
@@ -43,6 +45,8 @@ var _runway_seq := 0
 var _landside_dirty := true
 var _landside_cache := {}
 var _stand_seq := 0
+var _terminal_seq := 0
+var _concourse_seq := 0
 
 
 func _init() -> void:
@@ -185,8 +189,9 @@ func _refresh_cell(c: Vector2i) -> void:
 	# open let traffic cut the corner across a whole row of stands, and taxi from
 	# one stand directly onto another. find_path() opens its own endpoints, so the
 	# only way onto a stand is a turn off the taxiway beside it.
-	_astar.set_point_solid(c, t == TileType.EMPTY or t == TileType.TERMINAL \
-		or t == TileType.ROAD or t == TileType.PARKING or t == TileType.STAND)
+	_astar.set_point_solid(c, t == TileType.EMPTY or t == TileType.CONCOURSE \
+		or t == TileType.TERMINAL or t == TileType.ROAD or t == TileType.PARKING \
+		or t == TileType.STAND)
 	_landside_dirty = true
 	_astar.set_point_weight_scale(c, RUNWAY_WEIGHT if t == TileType.RUNWAY else 1.0)
 
@@ -202,13 +207,127 @@ func place_taxiway(c: Vector2i) -> void:
 	_refresh_cell(c)
 
 
-func can_place_terminal(c: Vector2i) -> bool:
-	return is_buildable(c) and tile_type(c) == TileType.EMPTY
+# --- terminals and concourses ---
+#
+# A terminal is the main hall: landside, needs a road, and processes passengers.
+# Concourses are the piers that hang off it, and stands attach to *those* — never
+# to the hall itself. Both are fixed-size multi-tile buildings rather than
+# painted tiles, because both are single authored meshes: the sizes below are the
+# meshes' own dimensions in tiles, so a building is exactly one model.
+const TERMINAL_SIZE := Vector2i(6, 2)
+const CONCOURSE_SIZE := Vector2i(1, 4)
 
 
-func place_terminal(c: Vector2i) -> void:
-	tiles[c] = {"type": TileType.TERMINAL, "entity_id": -1}
-	_refresh_cell(c)
+# Footprint of a `size` building anchored at `anchor`. rot 1 swaps the axes, so a
+# 6x2 hall becomes 2x6. Both meshes are authored with their long axis along the
+# same axis, which is what makes "same rot" mean "perpendicular to each other".
+static func building_cells(anchor: Vector2i, size: Vector2i, rot: int) -> Array:
+	var w := size.y if rot == 1 else size.x
+	var h := size.x if rot == 1 else size.y
+	var cells := []
+	for j in h:
+		for i in w:
+			cells.append(anchor + Vector2i(i, j))
+	return cells
+
+
+func _cells_are_free(cells: Array) -> bool:
+	for c in cells:
+		if not is_buildable(c) or tile_type(c) != TileType.EMPTY:
+			return false
+	return not cells.is_empty()
+
+
+func can_place_terminal(cells: Array) -> bool:
+	return _cells_are_free(cells)
+
+
+func place_terminal(cells: Array, rot: int) -> int:
+	var id := _terminal_seq
+	_terminal_seq += 1
+	terminals.append({"id": id, "cells": cells.duplicate(), "rot": rot})
+	for c in cells:
+		tiles[c] = {"type": TileType.TERMINAL, "entity_id": id}
+		_refresh_cell(c)
+	return id
+
+
+# A concourse has to hang off a terminal, and perpendicular to it. Its own long
+# axis is already perpendicular to the hall's at the same `rot` (see
+# building_cells), so what is checked here is that one of its two ENDS abuts a
+# terminal — which is also what decides which way round the mesh goes, since the
+# model's link is at one end and its tip at the other.
+func concourse_attachment(cells: Array) -> int:
+	if cells.is_empty():
+		return -1
+	for end in [cells[0], cells[cells.size() - 1]]:
+		for n in neighbors(end):
+			if tile_type(n) == TileType.TERMINAL:
+				return tiles[n]["entity_id"]
+	return -1
+
+
+func can_place_concourse(cells: Array) -> bool:
+	return _cells_are_free(cells) and concourse_attachment(cells) >= 0
+
+
+func place_concourse(cells: Array, rot: int) -> int:
+	var id := _concourse_seq
+	_concourse_seq += 1
+	# `root` is the end that meets the terminal; the mesh is laid from there
+	# outward, so the link lands against the hall whichever way it was drawn.
+	var terminal_id := concourse_attachment(cells)
+	var ordered: Array = cells.duplicate()
+	if not _end_touches_terminal(cells[0]):
+		ordered.reverse()
+	concourses.append({
+		"id": id, "cells": ordered, "rot": rot, "terminal_id": terminal_id,
+	})
+	for c in cells:
+		tiles[c] = {"type": TileType.CONCOURSE, "entity_id": id}
+		_refresh_cell(c)
+	return id
+
+
+func _end_touches_terminal(c: Vector2i) -> bool:
+	for n in neighbors(c):
+		if tile_type(n) == TileType.TERMINAL:
+			return true
+	return false
+
+
+# Whichever building owns this cell, terminal or concourse.
+func _building_at(c: Vector2i) -> Variant:
+	var t := tile_type(c)
+	if t == TileType.TERMINAL:
+		return get_terminal(tiles[c]["entity_id"])
+	if t == TileType.CONCOURSE:
+		return get_concourse(tiles[c]["entity_id"])
+	return null
+
+
+func get_terminal(id: int) -> Variant:
+	for t in terminals:
+		if t["id"] == id:
+			return t
+	return null
+
+
+func get_concourse(id: int) -> Variant:
+	for c in concourses:
+		if c["id"] == id:
+			return c
+	return null
+
+
+# A terminal is live only if a road reaches it: it is the landside building, so
+# it is where passengers actually arrive. Concourses are airside and never need
+# one.
+func terminal_is_roaded(t: Dictionary) -> bool:
+	for c in t["cells"]:
+		if is_road_served(c):
+			return true
+	return false
 
 
 # A road leaves the property when it touches land the airport does not own, or
@@ -287,11 +406,22 @@ func place_parking(c: Vector2i) -> void:
 	_refresh_cell(c)
 
 
-func terminal_tile_count() -> int:
+# Terminal hall tiles that a road actually reaches. This is what passenger
+# capacity is derived from: the hall processes passengers, the piers only get
+# them to an aircraft.
+func terminal_tile_count(road_served_only: bool = true) -> int:
 	var n := 0
-	for c in tiles:
-		if tiles[c]["type"] == TileType.TERMINAL:
-			n += 1
+	for t in terminals:
+		if road_served_only and not terminal_is_roaded(t):
+			continue
+		n += (t["cells"] as Array).size()
+	return n
+
+
+func concourse_tile_count() -> int:
+	var n := 0
+	for c in concourses:
+		n += (c["cells"] as Array).size()
 	return n
 
 
@@ -300,7 +430,7 @@ func terminal_tile_count() -> int:
 func stand_is_contact(stand: Dictionary) -> bool:
 	for c in stand["cells"]:
 		for n in neighbors(c):
-			if tile_type(n) == TileType.TERMINAL:
+			if tile_type(n) == TileType.CONCOURSE:
 				return true
 	return false
 
@@ -425,29 +555,24 @@ func _restamp_runway(r: Dictionary) -> void:
 		_refresh_cell(c)
 
 
-# A stand spans `size` tiles from its anchor: 1 for a small stand, 2 for a
-# widebody stand. `rot` picks the axis — 0 runs east, 1 runs south — so a stand
-# can sit alongside a north-south taxiway instead of only an east-west one.
-# A size-1 stand is the same shape either way.
-func stand_cells_for(anchor: Vector2i, size: int, rot: int = 0) -> Array:
-	var step := Vector2i(0, 1) if rot == 1 else Vector2i(1, 0)
-	var cells := []
-	for i in size:
-		cells.append(anchor + step * i)
-	return cells
+# One stand size, taking any aircraft. The footprint is the stand mesh's own
+# 2x2, so a stand is exactly one model — and being square, `rot` changes only
+# which way the jet bridge faces, never which cells are occupied.
+const STAND_SIZE := Vector2i(2, 2)
+
+
+func stand_cells_for(anchor: Vector2i, rot: int = 0) -> Array:
+	return building_cells(anchor, STAND_SIZE, rot)
 
 
 func can_place_stand(cells: Array) -> bool:
-	for c in cells:
-		if not is_buildable(c) or tile_type(c) != TileType.EMPTY:
-			return false
-	return not cells.is_empty()
+	return _cells_are_free(cells)
 
 
-func place_stand(cells: Array, size: int) -> int:
+func place_stand(cells: Array, rot: int = 0) -> int:
 	var id := _stand_seq
 	_stand_seq += 1
-	stands.append({"id": id, "cells": cells.duplicate(), "size": size, "occupied": false})
+	stands.append({"id": id, "cells": cells.duplicate(), "rot": rot, "occupied": false})
 	for c in cells:
 		tiles[c] = {"type": TileType.STAND, "entity_id": id}
 		_refresh_cell(c)
@@ -518,7 +643,7 @@ func stand_park_point(g: Dictionary) -> Vector2:
 func stand_park_heading(g: Dictionary) -> float:
 	for c in g["cells"]:
 		for n in neighbors(c):
-			if tile_type(n) == TileType.TERMINAL:
+			if tile_type(n) == TileType.CONCOURSE:
 				return Vector2(n - c).angle()
 	var park := stand_park_cell(g)
 	if park != NOWHERE:
@@ -801,10 +926,17 @@ func demolish_preview(c: Vector2i) -> Dictionary:
 	match t:
 		TileType.EMPTY:
 			return {}
-		TileType.TAXIWAY, TileType.TERMINAL, TileType.ROAD, TileType.PARKING:
+		TileType.TAXIWAY, TileType.ROAD, TileType.PARKING:
 			if claims.has(c):
 				return {}
 			return {"type": t, "tiles": 1, "cells": [c]}
+		TileType.TERMINAL, TileType.CONCOURSE:
+			# Whole buildings, like stands and runways: half a terminal is not a
+			# thing, and the mesh could not be drawn for it anyway.
+			var b = _building_at(c)
+			if b == null:
+				return {}
+			return {"type": t, "tiles": b["cells"].size(), "cells": b["cells"].duplicate()}
 		TileType.STAND:
 			var g = stand_at(c)
 			if g == null or g["occupied"]:
@@ -836,6 +968,17 @@ func demolish(c: Vector2i) -> Dictionary:
 		TileType.RUNWAY:
 			var r = runway_at(c)
 			runways.erase(r)
+		TileType.TERMINAL:
+			var t = _building_at(c)
+			terminals.erase(t)
+			# Piers hanging off a demolished hall are orphaned, not destroyed —
+			# they simply stop being attached, and the player can clear them or
+			# build a new hall against them.
+			for con in concourses:
+				if con["terminal_id"] == t["id"]:
+					con["terminal_id"] = -1
+		TileType.CONCOURSE:
+			concourses.erase(_building_at(c))
 
 	for cell in preview["cells"]:
 		tiles.erase(cell)
@@ -852,8 +995,12 @@ func to_dict() -> Dictionary:
 		"tiles": tiles.duplicate(true),
 		"runways": runways.duplicate(true),
 		"stands": stands.duplicate(true),
+		"terminals": terminals.duplicate(true),
+		"concourses": concourses.duplicate(true),
 		"runway_seq": _runway_seq,
 		"stand_seq": _stand_seq,
+		"terminal_seq": _terminal_seq,
+		"concourse_seq": _concourse_seq,
 		"owned_tracts": owned_tracts.keys(),
 	}
 
@@ -864,6 +1011,10 @@ func from_dict(d: Dictionary) -> void:
 	stands = d["stands"]
 	_runway_seq = d["runway_seq"]
 	_stand_seq = d["stand_seq"]
+	terminals = d.get("terminals", [])
+	concourses = d.get("concourses", [])
+	_terminal_seq = d.get("terminal_seq", terminals.size())
+	_concourse_seq = d.get("concourse_seq", concourses.size())
 
 	owned_tracts.clear()
 	for i in d.get("owned_tracts", []):
@@ -887,23 +1038,34 @@ func seed_starter_airport() -> void:
 	# find. A single-width spine deadlocks head-on traffic almost immediately.
 	for x in range(4, 22):
 		place_taxiway(Vector2i(x, 10))
+	# The apron is TWO rows deep, not one. The old layout put its stands straight
+	# onto a single through taxiway; a pier pushes them back behind service lanes
+	# instead, and a lane that empties into one row deadlocks the moment two
+	# aircraft want stands off the same lane. Two rows give the pair somewhere to
+	# pass, which is the whole reason the parallel taxiway exists further out.
 	for x in range(8, 21):
 		place_taxiway(Vector2i(x, 7))
+		place_taxiway(Vector2i(x, 8))
 	place_taxiway(Vector2i(4, 11))
 	place_taxiway(Vector2i(19, 11))
-	for y in [8, 9]:
-		place_taxiway(Vector2i(8, y))
-		place_taxiway(Vector2i(20, y))
-	# Three stands side by side sharing ONE concourse. Spacing them out gave each
-	# stand its own detached one-tile building, which read as three terminals.
-	# Same tile counts as before, so the opening economy is unchanged.
-	for x in [11, 12, 13]:
-		place_stand(stand_cells_for(Vector2i(x, 6), 1), 1)
-		place_terminal(Vector2i(x, 5))
+	place_taxiway(Vector2i(8, 9))
+	place_taxiway(Vector2i(20, 9))
 
-	# Access road out to the northern boundary, plus a small car park. Without
-	# a road to the edge the concourse would handle no passengers at all.
-	for y in range(0, 5):
-		place_road(Vector2i(13, y))
-	place_parking(Vector2i(12, 3))
-	place_parking(Vector2i(14, 3))
+	# The landside spine, north to south: road in from the map edge, car parks
+	# beside it, the terminal hall across the top, then one concourse pier hanging
+	# off it at right angles with stands down BOTH flanks. Stands touch the pier,
+	# never the hall — that is the whole shape of the building now.
+	place_road(Vector2i(13, 0))
+	place_parking(Vector2i(12, 0))
+	place_parking(Vector2i(14, 0))
+	place_terminal(building_cells(Vector2i(10, 1), TERMINAL_SIZE, 0), 0)
+	place_concourse(building_cells(Vector2i(12, 3), CONCOURSE_SIZE, 0), 0)
+
+	# A service lane down each flank, TWO wide, feeding the apron rows below. One
+	# wide deadlocked: a lane serving two stands is a cul-de-sac, and two aircraft
+	# wanting stands off the same lane had nowhere to pass and were towed.
+	for y in range(3, 7):
+		for x in [8, 9, 15, 16]:
+			place_taxiway(Vector2i(x, y))
+	for anchor in [Vector2i(10, 3), Vector2i(10, 5), Vector2i(13, 3), Vector2i(13, 5)]:
+		place_stand(stand_cells_for(anchor, 0), 0)

@@ -151,16 +151,38 @@ effectively invisible. `Render3D.PLANE_SCALE_FUDGE` multiplies it, exactly as
 the old 2D renderer drew a 21px narrowbody against a 32px tile. Same rule as
 `REVENUE_SCALE` below: keep the lie in that one constant.
 
-**Placement has an axis, and the concourse finds its own.** Anything wider than
-one tile reads `build_rot` (0 east, 1 south), flipped with **Q** — `R` is the
-Runway tool and moving it would invalidate the shortcut sheet. Concourse tiles
-are placed one at a time and are *not* rotated by the player: `_build_terminals()`
-merges adjacent tiles into runs on whichever axis is longer, so a north-south
-concourse renders as one building rather than a column of huts. Ties go
-east-west, which keeps every pre-existing layout rendering exactly as it did.
+**Terminals, concourses and stands are one mesh each, and their sizes are the
+meshes'.** `TERMINAL_SIZE` 6x2, `CONCOURSE_SIZE` 1x4, `STAND_SIZE` 2x2 are the
+authored footprints in tiles, which is why they are fixed-size entities rather
+than painted tiles — no merging, no stretching, one model per building. The
+hierarchy is load-bearing: a **hall** is landside, needs a road and is where
+passenger capacity comes from; **piers** hang off it end-on and add no capacity
+of their own; **stands** attach to a *pier*, never to the hall, and only a stand
+touching a pier gets a jet bridge. Demolishing a hall orphans its piers rather
+than destroying them.
+
+`TileType`'s ordinals are serialized, so the old `TERMINAL` member (4) was
+*renamed* to `CONCOURSE` — which is what those tiles always functionally were,
+since stands attached to them — and the new `TERMINAL` was appended as 7. Old
+saves therefore load with their buildings as concourses.
+
+**Placement has an axis, and same rot means perpendicular.** Anything larger
+than one tile reads `build_rot` (0 east, 1 south), flipped with **Q** — `R` is
+the Runway tool and moving it would invalidate the shortcut sheet. Both building
+meshes are authored with their long axis on the same axis, so a hall and a pier
+at the *same* rot are automatically at right angles to each other. A stand is
+square, so rot turns only its jet bridge.
+
 Everything the sim reads off a stand — `stand_park_cell`, `stand_is_connected`,
-`stand_is_contact` — walks neighbours rather than assuming an axis. Keep it that
-way.
+`stand_is_contact`, `stand_park_heading` — walks neighbours rather than assuming
+an axis. Keep it that way.
+
+**A pier pushes stands off the through taxiway, which is a deadlock risk.** The
+old layout put its stands straight onto a through row. Behind a pier they sit
+off service lanes instead, and a single-width lane serving two stands is a
+cul-de-sac: two aircraft wanting stands off the same lane have nowhere to pass
+and get towed. The starter apron's flank lanes are two wide for exactly this
+reason, and it took three balance runs to find — the failure is intermittent.
 
 **Pausing is an undo window, and demolition costs money.** Every purchase routes
 through `_spend()`, which records it in `pause_ledger` while paused. Demolishing
