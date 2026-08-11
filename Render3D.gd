@@ -1115,8 +1115,10 @@ func _build_stands() -> void:
 		if not is_nan(h):
 			to_pier = Vector2(cos(h), sin(h))
 		var n: Node3D = STAND_MODEL.instantiate()
-		# Half the 2x2 footprint is exactly one tile, so this is its near edge.
-		n.position = w3(_cells_centre(g["cells"]) + to_pier * t, H_STAND)
+		# Laid along stand_park_point's axis, not the footprint's, so the painted
+		# lead-in lands on a cell centre and meets the taxiway centreline. Half
+		# the 2x2 footprint is exactly one tile, so this is its near edge.
+		n.position = w3(grid.stand_park_point(g) + to_pier * t, H_STAND)
 		# Local +z must run from that edge back across the stand, away from the
 		# pier — the direction the bridge extends to reach the aircraft.
 		n.rotation.y = atan2(-to_pier.x, -to_pier.y)

@@ -179,8 +179,20 @@ func _check_park_heading(main) -> void:
 	var mid: Vector2 = grid.stand_park_point(contact)
 	_expect(mid != grid.cell_to_world(grid.stand_park_cell(contact)),
 		"a 2x2 stand must park its aircraft off the park cell, in the middle")
-	_expect(mid == (grid.cell_to_world(Vector2i(22, 12)) + grid.cell_to_world(Vector2i(23, 13))) * 0.5,
-		"the park point must be the centre of the stand")
+	# ...and NOT on the stand's own centre either. A 2x2 block's middle is a grid
+	# line, while taxiway pieces draw their centreline down a cell's middle, so
+	# parking there put the lead-in permanently half a tile off the taxiway it
+	# joins. The axis is shifted onto a cell centre so the two meet.
+	var block: Vector2 = (grid.cell_to_world(Vector2i(22, 12))
+		+ grid.cell_to_world(Vector2i(23, 13))) * 0.5
+	_expect(mid != block, "the park point must not sit on the grid line between cells")
+	_expect(is_equal_approx(mid.distance_to(block), AG.TILE * 0.5),
+		"it must be shifted exactly half a tile off the block centre")
+	# Only the CROSS axis has to line up — that is the one the lead-in line runs
+	# down and the one a taxiway centreline sits on. How deep into the stand the
+	# aircraft sits meets nothing, so it is free to stay on a grid line.
+	_expect(is_equal_approx(mid.x, grid.cell_to_world(Vector2i(22, 12)).x),
+		"the lead-in axis must sit on a column centre, so it meets a centreline")
 
 	# Remote stand: nothing to face, so it points back out along the taxiway.
 	var remote = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(26, 16), 0), 0))

@@ -630,7 +630,21 @@ func stand_park_point(g: Dictionary) -> Vector2:
 	var sum := Vector2.ZERO
 	for c in cells:
 		sum += cell_to_world(c)
-	return sum / float(cells.size())
+	var centre: Vector2 = sum / float(cells.size())
+	# A 2x2 stand's own axis falls on a GRID LINE, halfway between two cells,
+	# while every taxiway piece draws its centreline down the middle of a CELL.
+	# Left alone, the stand's yellow lead-in line and the taxiway it is supposed
+	# to join are permanently half a tile apart and can never meet.
+	#
+	# So the axis is shifted half a tile sideways onto a cell centre. The
+	# aircraft parks on that line and the mesh is laid along it, which is why
+	# this lives here rather than in the renderer — the parked aircraft and the
+	# painted line have to agree.
+	var h := stand_park_heading(g)
+	if not is_nan(h):
+		var fwd := Vector2(cos(h), sin(h))
+		centre -= Vector2(-fwd.y, fwd.x) * (TILE * 0.5)
+	return centre
 
 
 # Which way a parked aircraft's nose should point. Real stands are nose-in, so a
