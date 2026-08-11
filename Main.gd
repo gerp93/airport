@@ -1974,6 +1974,52 @@ func move_toward_point(p: Dictionary, target: Vector2, speed: float, dt: float) 
 	return false
 
 
+# How fast a parked aircraft swings onto its stand heading, and creeps onto the
+# marks. Both are settled well inside the shortest turnaround, but slowly enough
+# to read as manoeuvring rather than snapping.
+const PARK_TURN_RATE := 2.2
+const PARK_CREEP_SPEED := 16.0
+
+
+# Parking is the one moment the aircraft's own motion gets it wrong twice over.
+#
+# Heading is otherwise only ever "the way I was last moving", so a stand entered
+# from the side left the aircraft pointing straight along the row — parked
+# broadside to its own jet bridge. And the taxi route ends at the stand's *park
+# cell*, which on a two-tile widebody stand is one half of it, so a widebody sat
+# on one tile with the other empty beside it.
+#
+# Both are eased rather than assigned: a snap the instant the wheels stop is as
+# conspicuous as the wrong pose was, and this is the one place in the game where
+# an aircraft sits still long enough for anyone to watch it move.
+#
+# `pos` moves but `cell` deliberately does not. Nothing derives `cell` from
+# position — it is only ever assigned as a route advances — so the claim, the
+# blocking checks and the departure route all still run off the park cell while
+# the aircraft straddles both tiles.
+func _settle_at_stand(p: Dictionary, dt: float) -> void:
+	var stand = grid.get_stand(p["stand_id"])
+	if stand == null:
+		return
+
+	var want: Vector2 = grid.stand_park_point(stand)
+	var offset: Vector2 = want - p["pos"]
+	var creep := PARK_CREEP_SPEED * dt
+	if offset.length() <= creep:
+		p["pos"] = want
+	else:
+		p["pos"] = p["pos"] + offset.normalized() * creep
+
+	var target: float = grid.stand_park_heading(stand)
+	if is_nan(target):
+		return
+	# wrapf to (-PI, PI] picks the short way round; without it an aircraft
+	# needing -170 degrees would take the 190-degree route.
+	var diff: float = wrapf(target - float(p["heading"]), -PI, PI)
+	var step := PARK_TURN_RATE * dt
+	p["heading"] = float(p["heading"]) + clampf(diff, -step, step)
+
+
 func set_path(p: Dictionary, path: Array) -> void:
 	p["path"] = path
 	p["path_index"] = 1 if not path.is_empty() and path[0] == p["cell"] else 0
@@ -2332,6 +2378,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 
 		# Parked, but the turnaround cannot begin until ground support frees up.
 		"AWAIT_SERVICE":
+			_settle_at_stand(p, dt)
 			p["service_wait"] += dt
 			if try_start_service(p):
 				p["state"] = "AT_STAND"
@@ -2351,6 +2398,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				], "critical")
 
 		"AT_STAND":
+			_settle_at_stand(p, dt)
 			if p["state_timer"] >= p["turnaround"]:
 				var take: int = p["payout"]
 				if p["holds"].has("mech"):
@@ -3559,7 +3607,10 @@ func _label_plane(p: Dictionary) -> void:
 		label += " !"
 
 	var alt: float = float(p.get("_render_alt", 0.0))
-	var at: Vector2 = render3d.world_to_screen(p["pos"], alt + 18.0) + Vector2(-22, -6)
+	# Lifted clear of the model rather than sitting on it. Bare text could overlap
+	# an aircraft and still leave it readable; an opaque plate cannot, and a
+	# parked aircraft would otherwise be hidden under its own callsign.
+	var at: Vector2 = render3d.world_to_screen(p["pos"], alt + 42.0) + Vector2(-22, -8)
 	# Skip the label while the aircraft is still flying in from off-map, or it
 	# renders as clipped text jammed against the screen edge.
 	if at.x < 28.0:

@@ -179,8 +179,14 @@ func is_navigable(c: Vector2i) -> bool:
 func _refresh_cell(c: Vector2i) -> void:
 	var t := tile_type(c)
 	# Terminals, roads and car parks are landside: aircraft route around them.
+	#
+	# Stands are solid too, which is not obvious: an aircraft plainly does drive
+	# onto one. But a stand is a destination, never a through route — leaving them
+	# open let traffic cut the corner across a whole row of stands, and taxi from
+	# one stand directly onto another. find_path() opens its own endpoints, so the
+	# only way onto a stand is a turn off the taxiway beside it.
 	_astar.set_point_solid(c, t == TileType.EMPTY or t == TileType.TERMINAL \
-		or t == TileType.ROAD or t == TileType.PARKING)
+		or t == TileType.ROAD or t == TileType.PARKING or t == TileType.STAND)
 	_landside_dirty = true
 	_astar.set_point_weight_scale(c, RUNWAY_WEIGHT if t == TileType.RUNWAY else 1.0)
 
@@ -491,6 +497,37 @@ func stand_park_cell(g: Dictionary) -> Vector2i:
 	return NOWHERE
 
 
+# Where a parked aircraft actually sits. The park *cell* is only where the taxi
+# route ends — on a two-tile widebody stand that is one half of it, which left a
+# widebody parked on one tile with the other visibly empty beside it.
+func stand_park_point(g: Dictionary) -> Vector2:
+	var cells: Array = g["cells"]
+	var sum := Vector2.ZERO
+	for c in cells:
+		sum += cell_to_world(c)
+	return sum / float(cells.size())
+
+
+# Which way a parked aircraft's nose should point. Real stands are nose-in, so a
+# concourse alongside decides it outright — that is what the jet bridge reaches.
+# A remote stand has nothing to face, so it points away from the taxiway it came
+# in by, which is the direction it would be pushed back from.
+#
+# Returns NAN when the stand answers neither question; the caller then leaves the
+# aircraft's heading alone rather than snapping it to an arbitrary axis.
+func stand_park_heading(g: Dictionary) -> float:
+	for c in g["cells"]:
+		for n in neighbors(c):
+			if tile_type(n) == TileType.TERMINAL:
+				return Vector2(n - c).angle()
+	var park := stand_park_cell(g)
+	if park != NOWHERE:
+		for n in neighbors(park):
+			if tile_type(n) == TileType.TAXIWAY:
+				return Vector2(park - n).angle()
+	return NAN
+
+
 func runway_is_usable(r: Dictionary) -> bool:
 	return runway_length_tiles(r) >= float(MIN_RUNWAY_LEN) and runway_exit_taxiway(r) != NOWHERE
 
@@ -699,7 +736,26 @@ func find_path(from: Vector2i, to: Vector2i) -> Array:
 		return []
 	if not is_navigable(from) or not is_navigable(to):
 		return []
-	return Array(_astar.get_id_path(from, to))
+	# Aircraft taxi from a taxiway onto a stand, or off a stand towards a runway
+	# — never from one stand to another. Both assignment paths in Main require
+	# the aircraft to be HOLDING on a taxiway first. Refusing it here is what
+	# stops the endpoint-opening below from becoming the one route that drives
+	# straight off one stand onto the next when the two happen to be adjacent.
+	if from != to and tile_type(from) == TileType.STAND and tile_type(to) == TileType.STAND:
+		return []
+	# A stand is solid to the pathfinder (see _refresh_cell), so a route that
+	# starts or ends on one has to have that end opened for the query. Opening
+	# only the endpoints is the whole trick: an aircraft can taxi onto its own
+	# stand and push back off it, but no route is ever found *through* a stand.
+	var opened := []
+	for c in [from, to]:
+		if _astar.is_point_solid(c):
+			_astar.set_point_solid(c, false)
+			opened.append(c)
+	var path := Array(_astar.get_id_path(from, to))
+	for c in opened:
+		_astar.set_point_solid(c, true)
+	return path
 
 
 # Same query, but treats tiles held by other planes as walls so a blocked plane
@@ -726,7 +782,10 @@ func nearest_free_taxiway(from: Vector2i, plane_id: int) -> Vector2i:
 		if c != from and tile_type(c) == TileType.TAXIWAY and claim_owner(c) in [-1, plane_id]:
 			return c
 		for n in neighbors(c):
-			if seen.has(n) or not is_navigable(n):
+			# Never expand *through* a stand, or this can return a taxiway that
+			# only find_path's own rules make unreachable. The seed cell is
+			# exempt, so a plane sitting on a stand can still search out of it.
+			if seen.has(n) or not is_navigable(n) or tile_type(n) == TileType.STAND:
 				continue
 			seen[n] = true
 			queue.append(n)

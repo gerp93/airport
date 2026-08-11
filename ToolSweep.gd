@@ -63,6 +63,8 @@ func _ready() -> void:
 
 	_check_land(main)
 	_check_rotation(main)
+	_check_park_heading(main)
+	_check_stand_routing(main)
 	_check_finance(main)
 	_check_layout(main)
 	print("tool sweep complete")
@@ -122,6 +124,75 @@ func _check_rotation(main) -> void:
 
 	grid.place_terminal(anchor + Vector2i(-1, 1))
 	_expect(grid.stand_is_contact(stand), "a concourse alongside must give it a bridge")
+
+
+# Parked aircraft face where the stand says, not where they happened to be
+# driving. The case that matters is a stand entered from the side: the taxiway
+# and the concourse then disagree, and the concourse has to win or the aircraft
+# sits broadside to its own jet bridge.
+func _check_park_heading(main) -> void:
+	var grid = main.grid
+
+	# Contact stand: taxiway to the east, concourse to the north.
+	var cells: Array = grid.stand_cells_for(Vector2i(6, 3), 2, 1)
+	var contact = grid.get_stand(grid.place_stand(cells, 2))
+	grid.place_taxiway(Vector2i(7, 3))
+	grid.place_terminal(Vector2i(6, 2))
+	_expect(_same_angle(grid.stand_park_heading(contact), -PI / 2.0),
+		"a contact stand must point its aircraft at the concourse, not away from the taxiway")
+
+	# A widebody parks across both tiles, not on the one the taxi route ended on.
+	var mid: Vector2 = grid.stand_park_point(contact)
+	_expect(mid != grid.cell_to_world(grid.stand_park_cell(contact)),
+		"a two-tile stand must park its aircraft off the park cell, between both tiles")
+	_expect(mid == (grid.cell_to_world(Vector2i(6, 3)) + grid.cell_to_world(Vector2i(6, 4))) * 0.5,
+		"the park point must be the centre of the stand")
+	var single = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(6, 6), 1), 1))
+	_expect(grid.stand_park_point(single) == grid.cell_to_world(Vector2i(6, 6)),
+		"a one-tile stand's park point must still be its own centre")
+
+	# Remote stand: nothing to face, so it points back out along the taxiway.
+	var remote = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(9, 3), 1), 1))
+	_expect(is_nan(grid.stand_park_heading(remote)),
+		"an unconnected stand must not claim a heading")
+	grid.place_taxiway(Vector2i(10, 3))
+	_expect(_same_angle(grid.stand_park_heading(remote), PI),
+		"a remote stand must point away from its taxiway")
+
+
+# A stand is a destination, not a through route. Aircraft were taxiing straight
+# across rows of stands and from one stand onto the next, because stands were
+# left walkable in the A* grid.
+func _check_stand_routing(main) -> void:
+	var grid = main.grid
+	# A taxiway, a stand beside it, and a second taxiway on the far side, so the
+	# stand sits on the short route between the two.
+	grid.place_taxiway(Vector2i(15, 2))
+	grid.place_stand(grid.stand_cells_for(Vector2i(15, 3), 1), 1)
+	grid.place_taxiway(Vector2i(15, 4))
+
+	var through: Array = grid.find_path(Vector2i(15, 2), Vector2i(15, 4))
+	_expect(not through.has(Vector2i(15, 3)),
+		"a route between two taxiways must not cut across the stand between them")
+
+	# ...but the stand itself is still reachable, and still leavable.
+	var onto: Array = grid.find_path(Vector2i(15, 2), Vector2i(15, 3))
+	_expect(onto.size() >= 2 and onto[onto.size() - 1] == Vector2i(15, 3),
+		"an aircraft must still be able to taxi onto its own stand")
+	var off: Array = grid.find_path(Vector2i(15, 3), Vector2i(15, 2))
+	_expect(off.size() >= 2, "an aircraft must still be able to push back off its stand")
+
+	# Two stands touching: neither may be a doorway to the other.
+	grid.place_stand(grid.stand_cells_for(Vector2i(16, 3), 1), 1)
+	grid.place_taxiway(Vector2i(16, 2))
+	var hop: Array = grid.find_path(Vector2i(15, 3), Vector2i(16, 3))
+	_expect(hop.is_empty(), "there must be no route at all from one stand to another")
+
+
+func _same_angle(a: float, b: float) -> bool:
+	if is_nan(a):
+		return false
+	return absf(wrapf(a - b, -PI, PI)) < 0.001
 
 
 # Borrowing has no cursor either, so the balance run never touches it. The
