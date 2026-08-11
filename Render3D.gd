@@ -796,6 +796,23 @@ func _tx_rot(mask: int) -> int:
 	return out
 
 
+# A 2x2 stand spans TWO cells of the lane beside it, but only one of them is on
+# the stand's lead-in axis. Branching into both drew a tee where the second one
+# should have stayed a straight section, pointing at blank pavement with no line
+# to meet. So a stand only counts as a connection from the cell its lead-in
+# actually runs through.
+func _on_stand_leadin(from: Vector2i, stand_cell: Vector2i) -> bool:
+	var g = grid.stand_at(stand_cell)
+	if g == null:
+		return false
+	var h: float = grid.stand_park_heading(g)
+	if is_nan(h):
+		return false
+	var perp := Vector2(-sin(h), cos(h))
+	var offset: Vector2 = grid.cell_to_world(from) - grid.stand_park_point(g)
+	return absf(offset.dot(perp)) < 1.0
+
+
 func _build_taxiway_tile(cell: Vector2i, centre: Vector2) -> void:
 	# Anything an aircraft can taxi ONTO counts as a connection, not just other
 	# taxiways: a stand or a runway alongside has to get a branch turning into
@@ -807,8 +824,9 @@ func _build_taxiway_tile(cell: Vector2i, centre: Vector2) -> void:
 			[Vector2i(0, 1), TX_S], [Vector2i(-1, 0), TX_W]]:
 		var d: Vector2i = pair[0]
 		var t: int = grid.tile_type(cell + d)
-		if t == AirportGrid.TileType.TAXIWAY or t == AirportGrid.TileType.STAND \
-				or t == AirportGrid.TileType.RUNWAY:
+		if t == AirportGrid.TileType.TAXIWAY or t == AirportGrid.TileType.RUNWAY:
+			want |= int(pair[1])
+		elif t == AirportGrid.TileType.STAND and _on_stand_leadin(cell, cell + d):
 			want |= int(pair[1])
 
 	var chosen := ""
