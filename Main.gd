@@ -2007,6 +2007,8 @@ func move_toward_point(p: Dictionary, target: Vector2, speed: float, dt: float) 
 # to read as manoeuvring rather than snapping.
 const PARK_TURN_RATE := 2.2
 const PARK_CREEP_SPEED := 16.0
+# Slower than taxiing, because a real pushback is a tug walking it back.
+const PUSHBACK_SPEED := 11.0
 
 
 # Parking is the one moment the aircraft's own motion gets it wrong twice over.
@@ -2464,8 +2466,30 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			if stand != null:
 				stand["occupied"] = false
 			p["stand_id"] = -1
-			p["state"] = "TAXI_OUT"
+			# Off the marks tail-first before taxiing. An aircraft parked nose-in
+			# cannot drive forward out of a stand — it is pointing at the pier —
+			# so it reverses STRAIGHT back, one tile, along its own heading. Not
+			# toward the park cell: that is off to one side, and backing toward it
+			# is the sideways slide this was meant to remove.
+			var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
+			p["push_to"] = p["pos"] - fwd * AirportGrid.TILE
+			p["state"] = "PUSHBACK"
 			p["state_timer"] = 0.0
+
+		# Reversing off the stand: translate WITHOUT turning, so the tail leads
+		# and the nose stays on the pier right up until the aircraft is clear.
+		# Every other movement in the game sets heading from the direction of
+		# travel, which is exactly what must not happen here.
+		"PUSHBACK":
+			var back_to: Vector2 = p.get("push_to", p["pos"])
+			var away: Vector2 = back_to - p["pos"]
+			var step := PUSHBACK_SPEED * dt
+			if away.length() <= step:
+				p["pos"] = back_to
+				p["state"] = "TAXI_OUT"
+				p["state_timer"] = 0.0
+			else:
+				p["pos"] = p["pos"] + away.normalized() * step
 
 		"TAXI_OUT":
 			match advance_along_path(p, taxi_speed(), dt):

@@ -91,7 +91,8 @@ Aircraft state flow:
 ```
 AIR_HOLD -> APPROACH -> INBOUND -> LANDING -> SEEK_STAND -> (HOLDING)
          -> TAXI_TO_STAND -> AWAIT_SERVICE -> AT_STAND -> AWAIT_DEPART
-         -> TAXI_OUT -> HOLD_SHORT -> LINE_UP -> DEPARTING -> CLIMB_OUT
+         -> PUSHBACK -> TAXI_OUT -> HOLD_SHORT -> LINE_UP -> DEPARTING
+         -> CLIMB_OUT
          -> REMOVE
 ```
 

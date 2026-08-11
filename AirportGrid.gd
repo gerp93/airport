@@ -1065,7 +1065,20 @@ func seed_starter_airport() -> void:
 	place_parking(Vector2i(12, 0))
 	place_parking(Vector2i(14, 0))
 	place_terminal(building_cells(Vector2i(10, 1), TERMINAL_SIZE, 0), 0)
-	place_concourse(building_cells(Vector2i(11, 3), CONCOURSE_SIZE, 0), 0)
-	place_concourse(building_cells(Vector2i(14, 3), CONCOURSE_SIZE, 0), 0)
-	for anchor in [Vector2i(9, 5), Vector2i(12, 5), Vector2i(15, 5)]:
+	place_concourse(building_cells(Vector2i(12, 3), CONCOURSE_SIZE, 0), 0)
+
+	# The column order across the apron is: taxilane, stands, PIER, stands,
+	# taxilane. Every stand therefore has the pier on one flank and pavement on
+	# the other, which is what a nose-in stand requires — an aircraft parked
+	# facing the pier reverses straight back, and there has to be something to
+	# reverse onto. Stands backing onto grass was the visible symptom.
+	# The lanes are two cells, not one. A single-cell lane serving two stands is
+	# a cul-de-sac and cost 6 gridlocks a run — two aircraft wanting stands off
+	# the same lane have nowhere to pass. Two cells is also what a real taxilane
+	# alongside a pier is, and now that the pavement is drawn narrower than its
+	# tile it reads as a lane and its shoulder rather than as a slab.
+	for y in range(3, 7):
+		for x in [8, 9, 15, 16]:
+			place_taxiway(Vector2i(x, y))
+	for anchor in [Vector2i(10, 3), Vector2i(10, 5), Vector2i(13, 3), Vector2i(13, 5)]:
 		place_stand(stand_cells_for(anchor, 0), 0)
