@@ -765,8 +765,19 @@ const TX_MODELS := {
 	"tee": preload("res://assets/models/taxiway/tee.glb"),
 	"cross": preload("res://assets/models/taxiway/cross.glb"),
 }
-# The kit is authored for a 44-unit tile; the world's is 32.
+# The piece is a 44-unit square whose pavement is the middle 23 units; the rest
+# is shoulder. Every other asset in the game is authored at the world's 32 units
+# per tile — the stand is 62.7 across two, the pier 30 across one, the hall about
+# 31 — so the taxiway kit is the odd one out at 44.
+#
+# Squashing it to fit the tile is what made the taxiways look toy: it took the
+# pavement down to 17 units against a 64-unit stand and a 42-unit aircraft. At
+# native scale the pavement is 23 units, about seventy per cent of a tile, which
+# is the same proportion every other asset was drawn to. The shoulders then
+# overrun into the neighbouring cell, which is harmless — they are margin, and
+# neighbouring pieces' shoulders are the same material at the same height.
 const TX_MODEL_TILE := 44.0
+const TX_SCALE := 1.0
 
 
 # One yaw step is +90 degrees about Y, which carries model north to model west.
@@ -780,15 +791,18 @@ func _tx_rot(mask: int) -> int:
 
 
 func _build_taxiway_tile(cell: Vector2i, centre: Vector2) -> void:
-	# Only other taxiways count as connections. That is deliberate: a taxiway
-	# cell that merely abuts a runway is a dead end here, so it gets the `end`
-	# piece — and the `end` piece is the one carrying a hold bar, which is
-	# exactly the marking that belongs where a taxiway meets a runway.
+	# Anything an aircraft can taxi ONTO counts as a connection, not just other
+	# taxiways: a stand or a runway alongside has to get a branch turning into
+	# it. Counting taxiways alone gave the cell beside a stand a straight `mid`
+	# piece, which puts its shoulder against the stand — pavement running past
+	# the stand rather than turning onto it.
 	var want := 0
 	for pair in [[Vector2i(0, -1), TX_N], [Vector2i(1, 0), TX_E],
 			[Vector2i(0, 1), TX_S], [Vector2i(-1, 0), TX_W]]:
 		var d: Vector2i = pair[0]
-		if grid.tile_type(cell + d) == AirportGrid.TileType.TAXIWAY:
+		var t: int = grid.tile_type(cell + d)
+		if t == AirportGrid.TileType.TAXIWAY or t == AirportGrid.TileType.STAND \
+				or t == AirportGrid.TileType.RUNWAY:
 			want |= int(pair[1])
 
 	var chosen := ""
@@ -807,7 +821,7 @@ func _build_taxiway_tile(cell: Vector2i, centre: Vector2) -> void:
 		# An isolated stub matches nothing; a lone `end` still reads correctly.
 		chosen = "end"
 
-	var s: float = AirportGrid.TILE / TX_MODEL_TILE
+	var s := TX_SCALE
 	var holder := Node3D.new()
 	# Lifted onto the pavement band. The kit lays its pavement flat at y=0, real
 	# aerodrome fashion, which put it exactly coplanar with the ground and lost
@@ -816,9 +830,9 @@ func _build_taxiway_tile(cell: Vector2i, centre: Vector2) -> void:
 	holder.rotation.y = float(steps) * PI * 0.5
 	var m3: Node3D = (TX_MODELS[chosen] as PackedScene).instantiate()
 	m3.scale = Vector3.ONE * s
-	# The piece hangs south from its origin, so back it up half a tile to sit
-	# centred on the cell once rotated.
-	m3.position = Vector3(0.0, 0.0, -AirportGrid.TILE * 0.5)
+	# The piece hangs south from its origin, so back it up by half its own length
+	# — not half a tile — to sit centred on the cell once rotated.
+	m3.position = Vector3(0.0, 0.0, -TX_MODEL_TILE * s * 0.5)
 	holder.add_child(m3)
 	_tiles_root.add_child(holder)
 
