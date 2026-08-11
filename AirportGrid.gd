@@ -566,7 +566,18 @@ func stand_cells_for(anchor: Vector2i, rot: int = 0) -> Array:
 
 
 func can_place_stand(cells: Array) -> bool:
-	return _cells_are_free(cells)
+	if not _cells_are_free(cells):
+		return false
+	# Never against the hall. A stand touching the terminal gets no jet bridge —
+	# only piers give those — so it was already useless there, and the stand mesh
+	# and the hall mesh both overhang their own footprints enough to visibly
+	# interpenetrate. Refusing the placement fixes the rule and the overlap at
+	# once.
+	for c in cells:
+		for n in neighbors(c):
+			if tile_type(n) == TileType.TERMINAL:
+				return false
+	return true
 
 
 func place_stand(cells: Array, rot: int = 0) -> int:

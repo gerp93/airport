@@ -139,11 +139,10 @@ func _check_rotation(main) -> void:
 	# Stands attach to the PIER, not to the hall.
 	var by_pier = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(25, 4), 0), 0))
 	_expect(grid.stand_is_contact(by_pier), "a stand against a pier is a contact stand")
-	# Clear of the pier as well as the hall, or it would be a contact stand for
-	# the wrong reason and the check would pass by accident.
-	var by_hall = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(20, 3), 0), 0))
-	_expect(not grid.stand_is_contact(by_hall),
-		"a stand against the hall itself must NOT get a bridge")
+	# Directly under the hall's south face — the placement that used to be
+	# allowed, gave no bridge, and left the two meshes interpenetrating.
+	_expect(not grid.can_place_stand(grid.stand_cells_for(Vector2i(22, 3), 0)),
+		"a stand must not be placeable against the hall itself")
 
 	# Demolishing the hall orphans its piers rather than destroying them.
 	grid.demolish(Vector2i(22, 1))
@@ -154,7 +153,6 @@ func _check_rotation(main) -> void:
 		"a pier whose hall is gone must be orphaned, not deleted")
 	grid.demolish(Vector2i(24, 3))
 	grid.demolish(Vector2i(25, 4))
-	grid.demolish(Vector2i(20, 3))
 
 
 # Parked aircraft face where the stand says, not where they happened to be

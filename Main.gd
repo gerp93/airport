@@ -3353,7 +3353,7 @@ func _update_hud() -> void:
 			else:
 				tool_info_label.text = "%s per tile" % money_str(COST_RUNWAY_TILE)
 		Tool.STAND:
-			hint_label.text = "STAND — 2x2, beside a taxiway. Takes any aircraft.\nAgainst a concourse it gets a jet bridge."
+			hint_label.text = "STAND — 2x2, beside a taxiway. Takes any aircraft.\nGoes against a concourse, never the terminal itself."
 			tool_info_label.text = "%s · %s (Q to rotate)" % [money_str(COST_STAND), rot_name()]
 		Tool.TERMINAL:
 			hint_label.text = "TERMINAL — the 6x2 hall, laid %s. Needs a road.\nConcourses attach to it; stands attach to those." % rot_name()
