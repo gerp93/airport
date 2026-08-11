@@ -37,24 +37,34 @@ func _ready() -> void:
 	# tool would silently drop out of coverage the moment it was added.
 	for t in range(MainScript.Tool.size()):
 		main.tool = t
-		# Several drag targets, so the runway readout's heading maths runs at a
-		# range of angles rather than one convenient axis-aligned case.
-		for target in [Vector2i(12, 8), Vector2i(20, 14), Vector2i(4, 4), Vector2i(25, 3)]:
-			main.hover_cell = target
-			main.drag_start = Vector2i(10, 10)
-			main.is_dragging = true
+		# Both placement axes: the ghost and the HUD readout both branch on
+		# build_rot, and a vertical multi-tile stand takes a different path
+		# through stand_cells_for than the east-west one every layout uses.
+		for rot in 2:
+			main.build_rot = rot
+			# Several drag targets, so the runway readout's heading maths runs at
+			# a range of angles rather than one convenient axis-aligned case.
+			for target in [Vector2i(12, 8), Vector2i(20, 14), Vector2i(4, 4), Vector2i(25, 3)]:
+				main.hover_cell = target
+				main.drag_start = Vector2i(10, 10)
+				main.is_dragging = true
+				main._update_hud()
+				main._update_ops_ui()
+				main._update_bank_ui()
+				main._sync_world()
+				await get_tree().process_frame
+
+			main.is_dragging = false
+			main.hover_cell = Vector2i(9, 9)
 			main._update_hud()
-			main._update_ops_ui()
 			main._sync_world()
 			await get_tree().process_frame
-
-		main.is_dragging = false
-		main.hover_cell = Vector2i(9, 9)
-		main._update_hud()
-		main._sync_world()
-		await get_tree().process_frame
+	main.build_rot = 0
 
 	_check_land(main)
+	_check_rotation(main)
+	_check_finance(main)
+	_check_layout(main)
 	print("tool sweep complete")
 	get_tree().quit()
 
@@ -84,6 +94,86 @@ func _check_land(main) -> void:
 	_expect(grid.can_place_taxiway(outside), "bought land must be buildable")
 	_expect(grid.owned_bounds() != before, "owned bounds must grow after a purchase")
 	_expect(not grid.landside_roads().is_empty(), "road must still reach outside after buying")
+
+
+# A north-south widebody stand has to satisfy the same contract the sim reads
+# off every stand — connected, contact, and parkable. Those all walk neighbours
+# rather than assuming an axis, so this guards that they stay that way.
+func _check_rotation(main) -> void:
+	var grid = main.grid
+	var anchor := Vector2i(3, 3)
+
+	var cells: Array = grid.stand_cells_for(anchor, 2, 1)
+	_expect(cells.size() == 2, "a widebody stand must be two cells")
+	_expect(cells[1] == anchor + Vector2i(0, 1), "rot 1 must run north-south")
+	_expect(grid.stand_cells_for(anchor, 2, 0)[1] == anchor + Vector2i(1, 0),
+		"rot 0 must run east-west")
+
+	_expect(grid.can_place_stand(cells), "a rotated stand must be placeable")
+	var id: int = grid.place_stand(cells, 2)
+	var stand = grid.get_stand(id)
+	_expect(not grid.stand_is_connected(stand), "no taxiway yet, so not connected")
+
+	# Touch only the *second* cell, which an east-west assumption would miss.
+	grid.place_taxiway(anchor + Vector2i(1, 1))
+	_expect(grid.stand_is_connected(stand), "a taxiway on either cell must connect it")
+	_expect(grid.stand_park_cell(stand) == anchor + Vector2i(0, 1),
+		"the parking cell must be the one touching the taxiway")
+
+	grid.place_terminal(anchor + Vector2i(-1, 1))
+	_expect(grid.stand_is_contact(stand), "a concourse alongside must give it a bridge")
+
+
+# Borrowing has no cursor either, so the balance run never touches it. The
+# invariant worth guarding is that cash and debt move together and that the
+# reputation-derived ceiling actually holds.
+func _check_finance(main) -> void:
+	var cash0: int = main.money
+	var limit: int = main.credit_limit()
+	_expect(limit > 0, "a reputable airport must have credit")
+
+	main.borrow(MainScript.LOAN_STEP)
+	_expect(main.loan_principal == MainScript.LOAN_STEP, "borrowing must record the debt")
+	_expect(main.money == cash0 + MainScript.LOAN_STEP, "borrowing must deliver the cash")
+
+	# Draw the ceiling down in full, then check it refuses to go past it.
+	main.borrow(limit)
+	_expect(main.loan_principal == limit, "borrowing must cap at the credit limit")
+	main.borrow(MainScript.LOAN_STEP)
+	_expect(main.loan_principal == limit, "a full facility must refuse more credit")
+
+	var interest: int = main.daily_interest()
+	_expect(interest > 0, "outstanding debt must accrue interest")
+	main.end_of_day()
+
+	main.repay(limit)
+	_expect(main.loan_principal == 0, "repaying in full must clear the debt")
+	main.repay(MainScript.LOAN_STEP)
+	_expect(main.loan_principal == 0, "repaying with no debt must be a no-op")
+	main.money = cash0
+
+
+# The HUD is laid out from the live viewport size, so a window the layout has
+# never seen is exactly the case that used to break. Drive both extremes.
+func _check_layout(main) -> void:
+	for size in [Vector2i(1120, 800), Vector2i(2560, 1440), Vector2i(1440, 900)]:
+		main.get_window().size = size
+		main._layout_ui()
+		var vp: Vector2 = main.get_viewport_rect().size
+		var log_node = main.log_label
+		_expect(log_node.position.x >= 0.0, "log must not start off-screen")
+		_expect(log_node.position.y + log_node.size.y <= vp.y + 1.0,
+			"log must stay inside the window at %s" % size)
+		var route = main.get_node("UI/RoutePanel")
+		_expect(route.position.x + route.size.x <= vp.x + 1.0,
+			"sidebar must stay inside the window at %s" % size)
+		# The regression that prompted this: speed buttons drawn over the sidebar.
+		_expect(main.get_node("UI/Speed3Btn").position.y > route.position.y + route.size.y - 1.0,
+			"toolbar must clear the sidebar at %s" % size)
+		# ...and the one it turned up: route text spilling out of its own panel.
+		var active = route.get_node("ActiveLabel")
+		_expect(active.position.y + active.size.y <= route.size.y + 1.0,
+			"route list must stay inside the route panel at %s" % size)
 
 
 func _expect(ok: bool, what: String) -> void:

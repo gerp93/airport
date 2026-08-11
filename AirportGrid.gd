@@ -419,12 +419,15 @@ func _restamp_runway(r: Dictionary) -> void:
 		_refresh_cell(c)
 
 
-# A stand spans `size` tiles to the right of its anchor: 1 for a small stand,
-# 2 for a widebody stand.
-func stand_cells_for(anchor: Vector2i, size: int) -> Array:
+# A stand spans `size` tiles from its anchor: 1 for a small stand, 2 for a
+# widebody stand. `rot` picks the axis — 0 runs east, 1 runs south — so a stand
+# can sit alongside a north-south taxiway instead of only an east-west one.
+# A size-1 stand is the same shape either way.
+func stand_cells_for(anchor: Vector2i, size: int, rot: int = 0) -> Array:
+	var step := Vector2i(0, 1) if rot == 1 else Vector2i(1, 0)
 	var cells := []
 	for i in size:
-		cells.append(anchor + Vector2i(i, 0))
+		cells.append(anchor + step * i)
 	return cells
 
 

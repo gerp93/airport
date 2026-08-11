@@ -91,6 +91,24 @@ const UPKEEP_RUNWAY := 2_000
 const UPKEEP_STAND := 600
 const DAY_LENGTH := 90.0
 
+# --- financing ---
+#
+# The bank lends against reputation rather than against assets. That is the
+# point of it: a well-run airport can borrow into its next expansion, a failing
+# one cannot borrow its way out. At full reputation the ceiling is $40M against
+# a $28M opening balance, so credit roughly doubles what the first few moves
+# can reach without ever being free money.
+#
+# Interest is charged daily on the outstanding balance and nothing amortises
+# automatically — the player chooses when to pay down. At REVENUE_SCALE a
+# runway returns something like 6-7% a day, so the rate has to sit well under
+# that or borrowing would never be worth doing; too far under and debt is
+# strictly free. 0.6%/day is roughly a quarter of a mature airport's daily
+# take once the ceiling is drawn in full.
+const LOAN_LIMIT_PER_REP := 400_000
+const LOAN_RATE_DAILY := 0.006
+const LOAN_STEP := 5_000_000
+
 # Facilities are bought in units; each unit adds concurrency and daily upkeep,
 # so scaling up traffic means scaling up overhead.
 const FACILITIES := [
@@ -210,6 +228,8 @@ var day_time := 0.0
 var day_revenue := 0
 var last_day_revenue := 0
 var last_upkeep := 0
+var loan_principal := 0
+var last_interest := 0
 var facilities := {}
 var used := {"crew": 0, "fuel": 0, "term": 0, "mech": 0}
 var reputation := 100
@@ -247,6 +267,11 @@ var next_weather_at := 100.0
 
 var selected_plane_id := -1
 var tool: Tool = Tool.SELECT
+# Placement axis for anything wider than one tile: 0 runs east, 1 runs south.
+# Rotated with Q. R is already the Runway tool and moving it would invalidate
+# the shortcut sheet, so rotation took the next free key rather than the
+# conventional one.
+var build_rot := 0
 var hover_cell := AirportGrid.NOWHERE
 var drag_start := AirportGrid.NOWHERE
 var is_dragging := false
@@ -266,6 +291,12 @@ var is_dragging := false
 # describing the permanent HUD.
 var closure_banner: Panel
 var closure_label: Label
+
+var bank_panel: Panel
+var bank_title: Label
+var bank_label: Label
+var bank_borrow: Button
+var bank_repay: Button
 
 var slot_panel: Panel
 var slot_rows: Array = []
@@ -327,11 +358,21 @@ func _ready() -> void:
 	$UI/SaveBtn.pressed.connect(_toggle_slots)
 	$UI/LoadBtn.pressed.connect(_toggle_slots)
 	_refresh_save_buttons()
+	_build_hud_backdrops()
 	_build_closure_banner()
 	_build_confirm_dialog()
 	_build_slot_panel()
 	_build_help_panel()
+	_build_bank_panel()
 	$UI/HelpBtn.pressed.connect(_toggle_help)
+
+	# Below this the three HUD regions start eating each other; the layout code
+	# clamps rather than reflowing, so the floor is enforced here instead.
+	var win := get_window()
+	if win != null:
+		win.min_size = Vector2i(1120, 800)
+	get_viewport().size_changed.connect(_layout_ui)
+	_layout_ui()
 
 	# Godot's default Button style nearly vanishes on a dark panel, so the sidebar
 	# controls get an explicit one.
@@ -363,6 +404,258 @@ func _ready() -> void:
 	# session — they shouldn't make a network call or depend on GitHub being up.
 	if not (_echo_log or _auto_sign):
 		_check_for_update()
+
+
+# --- responsive layout ---
+#
+# Every HUD position used to be a fixed offset authored against a 1440x900
+# window. At any other size the sidebar floated short of the right edge, the log
+# was stranded above the bottom, and the speed buttons sat *on top of* the route
+# panel. Positions are computed here instead, from the live viewport size, and
+# what Main.tscn still carries is only what the editor shows.
+#
+# The screen divides into three regions that never overlap: a top strip, a right
+# sidebar, and a full-width bottom bar. The sidebar stops where the bottom bar
+# begins, which is what buys the toolbar enough width to hold every tool.
+
+const UI_MARGIN := 10.0
+const UI_TOP_H := 92.0
+const UI_ROW_H := 32.0
+const UI_FAC_ROW_H := 44.0
+const UI_BANK_H := 102.0
+const UI_ROUTE_MIN := 176.0
+# Shares of the top strip, in the order the four blocks read. Proportional
+# rather than equal: the two right-hand blocks carry the longest lines, and
+# equal quarters clipped both of them.
+const UI_TOP_SHARE := [0.234, 0.255, 0.218, 0.293]
+
+var hud_top: Panel
+var hud_bottom: Panel
+
+
+# Two plates behind the HUD text. Labels over the 3D world were unreadable
+# against light terrain — desert tan and snow especially — and one backdrop per
+# region is both cheaper and tidier than a stylebox on each label.
+func _build_hud_backdrops() -> void:
+	hud_top = Panel.new()
+	hud_bottom = Panel.new()
+	for p in [hud_top, hud_bottom]:
+		var style := StyleBoxFlat.new()
+		style.bg_color = Color(0.05, 0.07, 0.09, 0.74)
+		style.border_color = Color(0.30, 0.38, 0.36, 0.7)
+		style.set_corner_radius_all(4)
+		p.add_theme_stylebox_override("panel", style)
+		p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		$UI.add_child(p)
+		# Added last, so they would otherwise paint over everything they exist
+		# to sit behind.
+		$UI.move_child(p, 0)
+	var top_style: StyleBoxFlat = hud_top.get_theme_stylebox("panel")
+	top_style.border_width_bottom = 1
+	var bottom_style: StyleBoxFlat = hud_bottom.get_theme_stylebox("panel")
+	bottom_style.border_width_top = 1
+
+
+func _layout_ui() -> void:
+	var vp: Vector2 = get_viewport_rect().size
+	var m := UI_MARGIN
+
+	var side_w: float = clampf(vp.x * 0.30, 300.0, 416.0)
+	var side_x: float = vp.x - side_w - m
+
+	# The sidebar's contents have a real minimum height, so it claims its space
+	# first and the log absorbs whatever is left. Sizing the log first is what
+	# pushed the route panel out through the bottom of its own panel.
+	var fac_h: float = 34.0 + UI_FAC_ROW_H * float(FACILITIES.size()) + 8.0
+	var route_top: float = UI_TOP_H + 8.0 + fac_h + 6.0 + UI_BANK_H + 6.0
+	var side_floor: float = route_top + UI_ROUTE_MIN
+
+	var log_h: float = clampf(vp.y * 0.16, 96.0, 170.0)
+	var info_y: float = vp.y - m - log_h - 6.0 - UI_ROW_H - 22.0
+	if info_y - 6.0 < side_floor:
+		info_y = side_floor + 6.0
+		log_h = maxf(72.0, vp.y - m - info_y - 22.0 - UI_ROW_H - 6.0)
+	var bar_y: float = info_y + 22.0
+	var log_y: float = bar_y + UI_ROW_H + 6.0
+
+	hud_top.position = Vector2(m - 6.0, -6.0)
+	hud_top.size = Vector2(vp.x - 2.0 * m + 12.0, UI_TOP_H + 6.0)
+	hud_bottom.position = Vector2(m - 6.0, info_y - 6.0)
+	hud_bottom.size = Vector2(vp.x - 2.0 * m + 12.0, vp.y - info_y + 6.0)
+
+	_layout_top_strip(vp, m)
+	_layout_bottom_bar(vp, m, bar_y, info_y, log_y, log_h)
+	_layout_sidebar(side_x, side_w, fac_h, info_y - 6.0)
+
+	# Modals are centred rather than anchored — they are transient and their
+	# contents are laid out once against a fixed panel size.
+	_centre(confirm_panel, Vector2(560, 268))
+	_centre(slot_panel, Vector2(640, 322))
+	_centre(help_panel, Vector2(724, 490))
+	_centre($UI/GameOverPanel, Vector2(500, 330))
+	_centre($UI/StartPanel, Vector2(600, 430))
+
+	# The closure banner belongs over the field, not over the sidebar.
+	var banner_w: float = clampf(side_x - m - 40.0, 320.0, 724.0)
+	closure_banner.position = Vector2(m + (side_x - m - banner_w) * 0.5, UI_TOP_H + 14.0)
+	closure_banner.size = Vector2(banner_w, 48.0)
+	closure_label.size = closure_banner.size
+
+
+func _centre(c: Control, want: Vector2) -> void:
+	var vp: Vector2 = get_viewport_rect().size
+	c.size = want
+	c.position = ((vp - want) * 0.5).floor()
+
+
+# The strip runs the full window width, above the sidebar rather than beside it.
+func _layout_top_strip(vp: Vector2, m: float) -> void:
+	var usable: float = vp.x - 2.0 * m - 24.0
+	var block_h := UI_TOP_H - 12.0
+	var cols := PackedFloat32Array()
+	for share in UI_TOP_SHARE:
+		cols.append(usable * float(share))
+
+	var stack := [money_label, rep_label, day_label, next_in_label]
+	for i in stack.size():
+		var lbl: Label = stack[i]
+		lbl.position = Vector2(m, 6.0 + 22.0 * float(i))
+		lbl.size = Vector2(cols[0], 22.0)
+
+	var x: float = m + cols[0] + 8.0
+	for entry in [[stats_label, cols[1]], [capacity_label, cols[2]], [hint_label, cols[3]]]:
+		var lbl: Label = entry[0]
+		var w: float = entry[1]
+		lbl.position = Vector2(x, 6.0)
+		lbl.size = Vector2(w, block_h)
+		# Narrow windows would otherwise smear these into each other.
+		lbl.clip_text = true
+		x += w + 8.0
+
+
+func _layout_bottom_bar(vp: Vector2, m: float, bar_y: float, info_y: float,
+		log_y: float, log_h: float) -> void:
+	# Save/Load sit to the right of the log, with the update prompt beneath them.
+	var sq := 90.0
+	var save_x: float = vp.x - m - sq
+	var load_x: float = save_x - 6.0 - sq
+	$UI/SaveBtn.position = Vector2(load_x, log_y)
+	$UI/SaveBtn.size = Vector2(sq, UI_ROW_H)
+	$UI/LoadBtn.position = Vector2(save_x, log_y)
+	$UI/LoadBtn.size = Vector2(sq, UI_ROW_H)
+	$UI/UpdateBtn.position = Vector2(load_x, log_y + UI_ROW_H + 6.0)
+	$UI/UpdateBtn.size = Vector2(sq * 2.0 + 6.0, UI_ROW_H)
+
+	log_label.position = Vector2(m, log_y)
+	log_label.size = Vector2(maxf(200.0, load_x - 8.0 - m), log_h)
+
+	# The toolbar spans the full width because the sidebar stops above it.
+	var right := [$UI/PauseBtn, $UI/Speed1Btn, $UI/Speed2Btn, $UI/Speed3Btn]
+	var right_w := 76.0 + 3.0 * 60.0 + 3.0 * 6.0
+	var left_tools := [
+		$UI/SelectBtn, $UI/TaxiwayBtn, $UI/RunwayBtn, $UI/StandSmallBtn,
+		$UI/StandLargeBtn, $UI/TerminalBtn, $UI/RoadBtn, $UI/ParkingBtn,
+		$UI/DemolishBtn, $UI/LandBtn, $UI/HelpBtn,
+	]
+	var n := float(left_tools.size())
+	var avail: float = vp.x - 2.0 * m - right_w - 16.0
+	var bw: float = clampf((avail - (n - 1.0) * 6.0) / n, 52.0, 100.0)
+	# Button text does not shrink to fit and does not clip by default, so at
+	# narrow widths "Concourse" simply ran over "Road". Scale the type to the
+	# button and clip whatever still will not fit.
+	var fs: int = clampi(int(bw * 0.165), 11, 15)
+	var x := m
+	for b in left_tools:
+		var btn: Button = b
+		btn.position = Vector2(x, bar_y)
+		btn.size = Vector2(bw, UI_ROW_H)
+		btn.clip_text = true
+		btn.add_theme_font_size_override("font_size", fs)
+		x += bw + 6.0
+
+	# Laid out right to left from the window edge, so the speed controls stay
+	# pinned to the corner whatever the toolbar in front of them does.
+	var rx: float = vp.x - m
+	for i in range(right.size() - 1, -1, -1):
+		var b: Button = right[i]
+		var w: float = 76.0 if i == 0 else 60.0
+		rx -= w
+		b.position = Vector2(rx, bar_y)
+		b.size = Vector2(w, UI_ROW_H)
+		rx -= 6.0
+
+	# Tool readout right-aligned on the same line as the camera hint, so the
+	# bottom bar carries both without a row of its own for either.
+	tool_info_label.position = Vector2(m, info_y)
+	tool_info_label.size = Vector2(vp.x - 2.0 * m, 22.0)
+	if render3d != null:
+		render3d.set_hint_position(Vector2(m + 2.0, info_y + 3.0))
+
+
+func _layout_sidebar(side_x: float, side_w: float, fac_h: float, side_bottom: float) -> void:
+	var top := UI_TOP_H + 8.0
+	var fac: Panel = $UI/FacilityPanel
+	fac.position = Vector2(side_x, top)
+	fac.size = Vector2(side_w, fac_h)
+
+	var bw := 46.0
+	var sell_x: float = side_w - 12.0 - bw
+	var buy_x: float = sell_x - 6.0 - bw
+	var fac_title: Label = fac.get_node("Title")
+	fac_title.position = Vector2(12.0, 6.0)
+	fac_title.size = Vector2(side_w - 24.0, 22.0)
+	for i in 5:
+		var ry: float = 34.0 + UI_FAC_ROW_H * float(i)
+		var lbl: Label = fac.get_node("Row%dLabel" % i)
+		lbl.position = Vector2(12.0, ry)
+		lbl.size = Vector2(maxf(80.0, buy_x - 18.0), UI_FAC_ROW_H - 6.0)
+		var buy: Button = fac.get_node("Row%dBuy" % i)
+		buy.position = Vector2(buy_x, ry + 5.0)
+		buy.size = Vector2(bw, 28.0)
+		var sell: Button = fac.get_node("Row%dSell" % i)
+		sell.position = Vector2(sell_x, ry + 5.0)
+		sell.size = Vector2(bw, 28.0)
+
+	bank_panel.position = Vector2(side_x, top + fac_h + 6.0)
+	bank_panel.size = Vector2(side_w, UI_BANK_H)
+	bank_title.position = Vector2(12.0, 5.0)
+	bank_title.size = Vector2(side_w - 24.0, 20.0)
+	bank_label.position = Vector2(12.0, 27.0)
+	bank_label.size = Vector2(side_w - 24.0, 34.0)
+	var half: float = (side_w - 30.0) * 0.5
+	bank_borrow.position = Vector2(12.0, 66.0)
+	bank_borrow.size = Vector2(half, 28.0)
+	bank_repay.position = Vector2(18.0 + half, 66.0)
+	bank_repay.size = Vector2(half, 28.0)
+
+	var route_y: float = bank_panel.position.y + UI_BANK_H + 6.0
+	var route_h: float = maxf(UI_ROUTE_MIN, side_bottom - route_y)
+	var route: Panel = $UI/RoutePanel
+	route.position = Vector2(side_x, route_y)
+	route.size = Vector2(side_w, route_h)
+
+	var route_title: Label = route.get_node("Title")
+	route_title.position = Vector2(12.0, 6.0)
+	route_title.size = Vector2(side_w - 24.0, 22.0)
+	var offer_h: float = clampf(route_h * 0.36, 60.0, 132.0)
+	var offer: Label = route.get_node("OfferLabel")
+	offer.position = Vector2(12.0, 32.0)
+	offer.size = Vector2(side_w - 24.0, offer_h)
+	var btn_y: float = 32.0 + offer_h + 6.0
+	var bhalf: float = (side_w - 32.0) * 0.5
+	var accept: Button = route.get_node("AcceptBtn")
+	accept.position = Vector2(12.0, btn_y)
+	accept.size = Vector2(bhalf, 30.0)
+	var decline: Button = route.get_node("DeclineBtn")
+	decline.position = Vector2(20.0 + bhalf, btn_y)
+	decline.size = Vector2(bhalf, 30.0)
+	var active: Label = route.get_node("ActiveLabel")
+	active.position = Vector2(12.0, btn_y + 36.0)
+	active.size = Vector2(side_w - 24.0, maxf(20.0, route_h - btn_y - 44.0))
+	# Clipped, not merely sized: a squeezed window should show fewer route lines,
+	# never spill them out through the bottom of the panel and over the toolbar.
+	offer.clip_text = true
+	active.clip_text = true
 
 
 # A closure stops every movement on the field, which previously said so only as
@@ -409,6 +702,117 @@ func _update_closure_banner() -> void:
 	var pulse: float = 0.55 + 0.45 * absf(sin(time_elapsed * 2.2))
 	var sb: StyleBoxFlat = closure_banner.get_theme_stylebox("panel")
 	sb.border_color = Color(1.0, 0.45, 0.35, pulse)
+
+
+# --- financing ---
+#
+# Built in code beside the other overlays rather than added to Main.tscn: it
+# sits between the two sidebar panels and its whole layout is computed by
+# _layout_ui() anyway, so a scene entry would only carry positions that get
+# overwritten on the first frame.
+
+func _build_bank_panel() -> void:
+	bank_panel = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.07, 0.09, 0.11, 0.92)
+	style.border_color = Color(0.35, 0.45, 0.4)
+	style.set_border_width_all(1)
+	bank_panel.add_theme_stylebox_override("panel", style)
+	$UI.add_child(bank_panel)
+
+	bank_title = Label.new()
+	bank_title.add_theme_font_size_override("font_size", 15)
+	bank_title.text = "BANK"
+	bank_panel.add_child(bank_title)
+
+	bank_label = Label.new()
+	bank_label.add_theme_font_size_override("font_size", 12)
+	bank_panel.add_child(bank_label)
+
+	bank_borrow = Button.new()
+	bank_borrow.focus_mode = Control.FOCUS_NONE
+	bank_borrow.text = "Borrow"
+	bank_borrow.pressed.connect(borrow.bind(LOAN_STEP))
+	_style_button(bank_borrow)
+	bank_panel.add_child(bank_borrow)
+
+	bank_repay = Button.new()
+	bank_repay.focus_mode = Control.FOCUS_NONE
+	bank_repay.text = "Repay"
+	bank_repay.pressed.connect(repay.bind(LOAN_STEP))
+	_style_button(bank_repay)
+	bank_panel.add_child(bank_repay)
+
+
+func credit_limit() -> int:
+	return LOAN_LIMIT_PER_REP * reputation
+
+
+func borrow_headroom() -> int:
+	return maxi(0, credit_limit() - loan_principal)
+
+
+func daily_interest() -> int:
+	return int(round(float(loan_principal) * LOAN_RATE_DAILY))
+
+
+# Drawing down is not a purchase, so it deliberately does not route through
+# _spend(): there is nothing to undo, and repayment is available at any time
+# whether or not the clock is running.
+func borrow(amount: int) -> void:
+	var take := mini(amount, borrow_headroom())
+	if take <= 0:
+		add_log("The bank won't extend more credit — reputation %d caps you at %s." % [
+			reputation, money_str(credit_limit()),
+		], "muted")
+		return
+	loan_principal += take
+	money += take
+	add_log("Borrowed %s. Debt %s, interest %s/day." % [
+		money_str(take), money_str(loan_principal), money_str(daily_interest()),
+	], "money")
+
+
+func repay(amount: int) -> void:
+	if loan_principal <= 0:
+		return
+	var pay := mini(mini(amount, loan_principal), money)
+	if pay <= 0:
+		add_log("No cash on hand to repay with.", "muted")
+		return
+	loan_principal -= pay
+	money -= pay
+	if loan_principal == 0:
+		add_log("Repaid %s — the airport is debt free." % money_str(pay), "money")
+	else:
+		add_log("Repaid %s. Debt now %s, interest %s/day." % [
+			money_str(pay), money_str(loan_principal), money_str(daily_interest()),
+		], "money")
+
+
+func _update_bank_ui() -> void:
+	if bank_label == null:
+		return
+	var headroom := borrow_headroom()
+	if loan_principal <= 0:
+		bank_label.text = "No debt · %.1f%% per day on what you draw\nCan borrow %s at reputation %d" % [
+			LOAN_RATE_DAILY * 100.0, money_str(credit_limit()), reputation,
+		]
+	else:
+		bank_label.text = "Debt %s · interest %s/day\n%s of %s still available" % [
+			money_str(loan_principal), money_str(daily_interest()),
+			money_str(headroom), money_str(credit_limit()),
+		]
+	bank_borrow.disabled = headroom <= 0
+	bank_repay.disabled = loan_principal <= 0 or money <= 0
+	bank_borrow.text = "Borrow %s" % money_str(mini(LOAN_STEP, maxi(headroom, 0)))
+	bank_repay.text = "Repay %s" % money_str(mini(LOAN_STEP, maxi(loan_principal, 0)))
+	var tip := "The bank lends %s per point of reputation. Interest is charged every day on the balance, before upkeep — being overdrawn at day end still costs reputation, so debt makes a bad run worse as well as a good run faster." % money_str(LOAN_LIMIT_PER_REP)
+	# Label defaults to MOUSE_FILTER_IGNORE, which swallows the tooltip entirely.
+	bank_label.mouse_filter = Control.MOUSE_FILTER_STOP
+	bank_label.tooltip_text = tip
+	bank_borrow.tooltip_text = tip
+	bank_repay.tooltip_text = tip
 
 
 # --- confirmation dialog ---
@@ -650,10 +1054,13 @@ func _help_text() -> String:
 	return "\n".join([
 		"BUILD          T taxiway · R runway · G stand (small) · H stand (wide)",
 		"               E concourse · O road · P car park · X demolish · L buy land",
-		"               Esc back to Select",
+		"               Q rotate placement · Esc back to Select",
 		"",
 		"SIMULATION     Space pause/resume · 1 / 2 / 3 speed",
 		"               A sign the offer · D pass on it",
+		"",
+		"FINANCE        The bank lends against your reputation. Interest is charged",
+		"               every day on whatever is outstanding, before upkeep.",
 		"",
 		"SAVING         F5 save · F9 load",
 		"",
@@ -1202,15 +1609,30 @@ func update_weather() -> void:
 
 func end_of_day() -> void:
 	var bill := total_upkeep()
-	money -= bill
+	var interest := daily_interest()
+	money -= bill + interest
 	last_upkeep = bill
+	last_interest = interest
 	last_day_revenue = day_revenue
 	day_revenue = 0
-	add_log("Day %d closed — took %s, upkeep %s." % [day, money_str(last_day_revenue), money_str(bill)], "money")
+	if interest > 0:
+		add_log("Day %d closed — took %s, upkeep %s, interest %s on %s of debt." % [
+			day, money_str(last_day_revenue), money_str(bill),
+			money_str(interest), money_str(loan_principal),
+		], "money")
+	else:
+		add_log("Day %d closed — took %s, upkeep %s." % [day, money_str(last_day_revenue), money_str(bill)], "money")
 	day += 1
 	if money < 0:
 		reputation = max(0, reputation - 12)
-		add_log("OVERDRAWN — couldn't cover upkeep. Reputation -12.", "critical")
+		add_log("OVERDRAWN — couldn't cover the day's bills. Reputation -12.", "critical")
+		# Reputation is the credit limit, so an overdrawn day narrows the room to
+		# borrow out of it. That is the intended shape of the debt failure path:
+		# it tightens rather than ending the game outright.
+		if loan_principal > credit_limit():
+			add_log("Debt of %s now exceeds your %s credit limit." % [
+				money_str(loan_principal), money_str(credit_limit()),
+			], "warning")
 
 
 # --- airline relationships ---
@@ -2059,7 +2481,7 @@ func apply_tool_at(cell: Vector2i) -> void:
 
 		Tool.STAND_SMALL, Tool.STAND_LARGE:
 			var size := tool_stand_size()
-			var cells := grid.stand_cells_for(cell, size)
+			var cells := grid.stand_cells_for(cell, size, build_rot)
 			if not grid.can_place_stand(cells):
 				return
 			var stand_cost: int = COST_STAND_TILE * size
@@ -2224,6 +2646,22 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 			_runway_capability(length),
 		])
 	render3d.mark_layout_dirty()
+# The ghost reads `build_rot` directly, so flipping it is the whole action —
+# the preview under the cursor turns on the next frame.
+func _rotate_build() -> void:
+	build_rot = 1 - build_rot
+	if not tool_is_rotatable():
+		add_log("Rotation set to %s — it only affects multi-tile builds." % rot_name(), "muted")
+
+
+func tool_is_rotatable() -> bool:
+	return tool == Tool.STAND_LARGE
+
+
+func rot_name() -> String:
+	return "north-south" if build_rot == 1 else "east-west"
+
+
 func tool_stand_size() -> int:
 	return 2 if tool == Tool.STAND_LARGE else 1
 
@@ -2290,6 +2728,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 			KEY_D:
 				decline_offer()
+				return
+			KEY_Q:
+				_rotate_build()
 				return
 		if TOOL_KEYS.has(event.keycode):
 			_choose_tool(TOOL_KEYS[event.keycode])
@@ -2364,6 +2805,7 @@ func _process(delta: float) -> void:
 			_end_run()
 	_update_hud()
 	_update_ops_ui()
+	_update_bank_ui()
 	_update_route_ui()
 	_sync_world()
 	queue_redraw()
@@ -2470,6 +2912,7 @@ func save_game(slot: int = -1) -> void:
 		"next_spawn_at": next_spawn_at, "plane_id_seq": plane_id_seq,
 		"day": day, "day_time": day_time, "day_revenue": day_revenue,
 		"last_day_revenue": last_day_revenue, "last_upkeep": last_upkeep,
+		"loan_principal": loan_principal, "last_interest": last_interest,
 		"facilities": facilities.duplicate(),
 		"routes": routes.duplicate(true),
 		"arrival_queue": arrival_queue.duplicate(true),
@@ -2525,6 +2968,10 @@ func load_game(slot: int = -1) -> void:
 	day_revenue = d.get("day_revenue", day_revenue)
 	last_day_revenue = d.get("last_day_revenue", last_day_revenue)
 	last_upkeep = d.get("last_upkeep", last_upkeep)
+	# Defaulted rather than version-gated: a save written before financing
+	# existed simply restores as an airport with no debt, which is exactly right.
+	loan_principal = d.get("loan_principal", 0)
+	last_interest = d.get("last_interest", 0)
 	facilities = d.get("facilities", facilities)
 	# No aircraft are restored, so nothing is holding ground support.
 	for k in used:
@@ -2716,6 +3163,8 @@ func _update_route_ui() -> void:
 
 func _update_hud() -> void:
 	money_label.text = "Cash: %s" % money_str(money)
+	if loan_principal > 0:
+		money_label.text += "   ·   debt %s" % money_str(loan_principal)
 	rep_label.text = "Reputation: %d" % reputation
 	# Reputation is the lose condition, so make it shout before it runs out.
 	if reputation < 25:
@@ -2793,8 +3242,8 @@ func _update_hud() -> void:
 			hint_label.text = "STAND (small) — 1 tile, next to a taxiway.\nTakes Light and Narrowbody."
 			tool_info_label.text = money_str(COST_STAND_TILE)
 		Tool.STAND_LARGE:
-			hint_label.text = "STAND (widebody) — 2 tiles wide.\nTakes any aircraft, including Widebody."
-			tool_info_label.text = money_str(COST_STAND_TILE * 2)
+			hint_label.text = "STAND (widebody) — 2 tiles, laid %s.\nQ rotates. Takes any aircraft, including Widebody." % rot_name()
+			tool_info_label.text = "%s · %s (Q to rotate)" % [money_str(COST_STAND_TILE * 2), rot_name()]
 		Tool.TERMINAL:
 			hint_label.text = "CONCOURSE — click to build. Stands touching one\nget a jet bridge; the rest have to bus passengers."
 			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_TERMINAL_TILE), TERM_UNITS_PER_TILE]
@@ -2973,7 +3422,7 @@ func _sync_ghost() -> void:
 			ok = grid.can_place_parking(hover_cell) and money >= COST_PARKING_TILE
 		Tool.STAND_SMALL, Tool.STAND_LARGE:
 			var size := tool_stand_size()
-			cells = grid.stand_cells_for(hover_cell, size)
+			cells = grid.stand_cells_for(hover_cell, size, build_rot)
 			ok = grid.can_place_stand(cells) and money >= COST_STAND_TILE * size
 		Tool.DEMOLISH:
 			var preview := grid.demolish_preview(hover_cell)
@@ -3046,6 +3495,21 @@ func _draw_selected_route() -> void:
 		draw_polyline(points, Color(1.0, 0.37, 0.82, 0.65), 3.0)
 
 
+# In-world text sits on whatever colour the terrain happens to be, and white on
+# desert tan or snow is close to unreadable. Each label gets its own dark plate
+# rather than an outline: an outline still loses contrast against a light
+# background, a plate cannot. `at` is a baseline, so the plate is measured back
+# up by the font's ascent.
+func _plate_string(at: Vector2, text: String, size: int, color: Color) -> void:
+	var font := ThemeDB.fallback_font
+	var w: float = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	var asc := font.get_ascent(size)
+	var desc := font.get_descent(size)
+	draw_rect(Rect2(at.x - 4.0, at.y - asc - 2.0, w + 8.0, asc + desc + 4.0),
+		Color(0.04, 0.05, 0.07, 0.62), true)
+	draw_string(font, at, text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, color)
+
+
 func _label_runway(r: Dictionary) -> void:
 	var length: float = grid.runway_length_tiles(r)
 	var usable: bool = grid.runway_is_usable(r)
@@ -3061,7 +3525,7 @@ func _label_runway(r: Dictionary) -> void:
 	elif not usable:
 		label += " (NO TAXIWAY)"
 	var at: Vector2 = render3d.world_to_screen(r["a"], Render3D.H_MARKING) + Vector2(-14, -10)
-	draw_string(ThemeDB.fallback_font, at, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_color)
+	_plate_string(at, label, 12, label_color)
 
 
 func _label_stand(g: Dictionary) -> void:
@@ -3073,11 +3537,9 @@ func _label_stand(g: Dictionary) -> void:
 
 	var tag := "S%d%s" % [g["id"] + 1, "·W" if g["size"] >= 2 else ""]
 	var at: Vector2 = render3d.world_to_screen(centre, Render3D.H_STAND) + Vector2(-10, 4)
-	draw_string(ThemeDB.fallback_font, at, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 12,
-		Color(0.95, 0.95, 0.95))
+	_plate_string(at, tag, 12, Color(0.95, 0.95, 0.95))
 	if not grid.stand_is_connected(g):
-		draw_string(ThemeDB.fallback_font, at + Vector2(-8, -14), "unconnected",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1.0, 0.55, 0.55))
+		_plate_string(at + Vector2(-8, -14), "unconnected", 10, Color(1.0, 0.55, 0.55))
 
 
 func _label_plane(p: Dictionary) -> void:
@@ -3102,8 +3564,7 @@ func _label_plane(p: Dictionary) -> void:
 	# renders as clipped text jammed against the screen edge.
 	if at.x < 28.0:
 		return
-	draw_string(ThemeDB.fallback_font, at, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 10,
-		Color(1, 1, 1))
+	_plate_string(at, label, 10, _plane_status_color(p))
 
 
 func _draw_ghost_label() -> void:
@@ -3116,8 +3577,7 @@ func _draw_ghost_label() -> void:
 	var total: float = span if ext >= 0 else span + 1.0
 	var cost := int(round(COST_RUNWAY_TILE * total))
 	var at: Vector2 = render3d.world_to_screen(pb, Render3D.H_GHOST) + Vector2(-10, -18)
-	draw_string(ThemeDB.fallback_font, at, "%s — %s" % [length_str(total), money_str(cost)],
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1))
+	_plate_string(at, "%s — %s" % [length_str(total), money_str(cost)], 12, Color(1, 1, 1))
 
 
 # Largest aircraft class a runway of this length can take, as a letter code.

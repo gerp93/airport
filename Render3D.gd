@@ -161,6 +161,13 @@ func _build_hint() -> void:
 	layer.add_child(_hint)
 
 
+# Placed by Main's HUD layout rather than by a constant here: the hint belongs to
+# the bottom bar, and only Main knows where that bar ends up for a given window.
+func set_hint_position(p: Vector2) -> void:
+	if _hint != null:
+		_hint.position = p
+
+
 func attach(g) -> void:
 	grid = g
 	# The camera is built before the grid exists, so its pivot was placed at the
@@ -736,35 +743,53 @@ func _build_road_tile(cell: Vector2i, centre: Vector2) -> void:
 
 
 # A concourse is one building, not a row of huts. Adjacent TERMINAL tiles are
-# merged into horizontal runs and emitted as a single box, and the roof spans the
-# full run at full tile width so neighbouring rows fuse into one mass instead of
-# showing a seam between per-tile caps.
+# merged into a run and emitted as a single box, and the roof spans the full run
+# at full tile width so neighbouring rows fuse into one mass instead of showing a
+# seam between per-tile caps.
+#
+# Runs are found on *either* axis. Merging east-west only meant a concourse laid
+# out alongside a north-south taxiway rendered as a column of separate huts —
+# the same artefact horizontal merging was added to fix, just rotated.
 func _build_terminals() -> void:
-	var cells: Array = []
+	var pending := {}
 	for c in grid.tiles:
 		if grid.tile_type(c) == AirportGrid.TileType.TERMINAL:
-			cells.append(c)
-	if cells.is_empty():
+			pending[c] = true
+	if pending.is_empty():
 		return
 
-	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+	var order: Array = pending.keys()
+	order.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		if a.y != b.y:
 			return a.y < b.y
 		return a.x < b.x)
 
 	var t: float = AirportGrid.TILE
-	var i := 0
-	while i < cells.size():
-		var start: Vector2i = cells[i]
-		var run := 1
-		while i + run < cells.size() \
-				and cells[i + run].y == start.y \
-				and cells[i + run].x == start.x + run:
-			run += 1
+	for entry in order:
+		var start: Vector2i = entry
+		if not pending.has(start):
+			continue
+		# Take the longer of the two runs. Ties go east-west, so every layout
+		# that rendered as one building before still does.
+		var dir := Vector2i(1, 0)
+		var run := _run_length(pending, start, dir)
+		var south := _run_length(pending, start, Vector2i(0, 1))
+		if south > run:
+			dir = Vector2i(0, 1)
+			run = south
+		for i in run:
+			pending.erase(start + dir * i)
 
-		var centre: Vector2 = grid.cell_to_world(start) + Vector2((float(run) - 1.0) * t * 0.5, 0.0)
-		_build_concourse(start, run, centre)
-		i += run
+		var centre: Vector2 = grid.cell_to_world(start) \
+			+ Vector2(dir) * ((float(run) - 1.0) * t * 0.5)
+		_build_concourse(start, run, centre, dir)
+
+
+func _run_length(pending: Dictionary, start: Vector2i, step: Vector2i) -> int:
+	var n := 1
+	while pending.has(start + step * n):
+		n += 1
+	return n
 
 
 # A concourse as an actual building rather than a plain extruded block: a set-back
@@ -774,9 +799,16 @@ func _build_terminals() -> void:
 # Built parametrically here rather than as a mesh asset, because a run is any
 # length from one tile to the width of the field — a fixed mesh would have to be
 # stretched, and the glazing would stretch with it.
-func _build_concourse(start: Vector2i, run: int, centre: Vector2) -> void:
+# Geometry is laid out in the run's own frame — `a` along it, `p` across it —
+# and every box carries the run's yaw. That is what lets the same code emit an
+# east-west and a north-south concourse; `a`/`p` collapse to +x/+y for the
+# east-west case, so the numbers below are the ones this always used.
+func _build_concourse(start: Vector2i, run: int, centre: Vector2, dir: Vector2i) -> void:
 	var t: float = AirportGrid.TILE
-	var width: float = float(run) * t
+	var length: float = float(run) * t
+	var a := Vector2(dir)
+	var p := Vector2(-a.y, a.x)
+	var yaw := -a.angle()
 
 	var body := _mat("term", COL_TERMINAL)
 	var trim := _mat("termedge", COL_TERMINAL_EDGE)
@@ -786,45 +818,46 @@ func _build_concourse(start: Vector2i, run: int, centre: Vector2) -> void:
 	var upper_h := H_TERMINAL - ground_h
 
 	# Ground floor, slightly inset, so the upper storey reads as overhanging.
-	_add("term", "box", body, Vector3(width - 3.0, ground_h, t - 3.0),
-		w3(centre, ground_h * 0.5))
+	_add("term", "box", body, Vector3(length - 3.0, ground_h, t - 3.0),
+		w3(centre, ground_h * 0.5), yaw)
 	# Upper storey, full footprint.
-	_add("term", "box", body, Vector3(width, upper_h, t),
-		w3(centre, ground_h + upper_h * 0.5))
+	_add("term", "box", body, Vector3(length, upper_h, t),
+		w3(centre, ground_h + upper_h * 0.5), yaw)
 
 	# Continuous glazing on both long faces, one band per tile so it never
 	# stretches with the run.
 	var band_y := ground_h + upper_h * 0.42
 	for k in run:
-		var cx: float = centre.x + (float(k) - (float(run) - 1.0) * 0.5) * t
+		var along: float = (float(k) - (float(run) - 1.0) * 0.5) * t
 		for side in [-1.0, 1.0]:
 			_add("termglass", "box", glass,
 				Vector3(t * 0.78, upper_h * 0.34, 1.6),
-				w3(Vector2(cx, centre.y + side * (t * 0.5 - 0.4)), band_y))
+				w3(centre + a * along + p * (side * (t * 0.5 - 0.4)), band_y), yaw)
 
 	# Parapet, then rooftop plant to break the silhouette.
-	_add("termedge", "box", trim, Vector3(width, H_KERB, t),
-		w3(centre, H_TERMINAL + H_KERB * 0.5))
+	_add("termedge", "box", trim, Vector3(length, H_KERB, t),
+		w3(centre, H_TERMINAL + H_KERB * 0.5), yaw)
 	for k in run:
 		if k % 2 == 1:
 			continue
-		var rx: float = centre.x + (float(k) - (float(run) - 1.0) * 0.5) * t
+		var ralong: float = (float(k) - (float(run) - 1.0) * 0.5) * t
 		_add("term", "box", body, Vector3(t * 0.34, H_TERMINAL * 0.13, t * 0.30),
-			w3(Vector2(rx, centre.y - t * 0.12), H_TERMINAL + H_KERB + H_TERMINAL * 0.065))
+			w3(centre + a * ralong - p * (t * 0.12),
+				H_TERMINAL + H_KERB + H_TERMINAL * 0.065), yaw)
 
 	# A jet bridge to any stand this concourse fronts, which is what makes a
-	# contact stand look different from a remote one.
+	# contact stand look different from a remote one. All four sides, since a
+	# stand can now be laid out on either axis.
 	for k in run:
-		var cell := Vector2i(start.x + k, start.y)
-		for d in [Vector2i.DOWN, Vector2i.UP]:
+		var cell: Vector2i = start + dir * k
+		for d in [Vector2i.DOWN, Vector2i.UP, Vector2i.LEFT, Vector2i.RIGHT]:
 			if grid.tile_type(cell + d) != AirportGrid.TileType.STAND:
 				continue
-			var from: Vector2 = grid.cell_to_world(cell)
-			var dir := Vector2(d)
+			var bd := Vector2(d)
 			_add("termedge", "box", trim,
-				Vector3(t * 0.20, H_TERMINAL * 0.10, t * 0.66),
-				w3(from + dir * (t * 0.52), ground_h * 0.92),
-				0.0 if absf(dir.y) > 0.0 else PI * 0.5)
+				Vector3(t * 0.66, H_TERMINAL * 0.10, t * 0.20),
+				w3(grid.cell_to_world(cell) + bd * (t * 0.52), ground_h * 0.92),
+				-bd.angle())
 
 
 func _build_runways() -> void:

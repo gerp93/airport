@@ -84,6 +84,27 @@ AIR_HOLD -> APPROACH -> INBOUND -> LANDING -> SEEK_STAND -> (HOLDING)
          -> REMOVE
 ```
 
+### The HUD is laid out in code, not in the scene
+
+`Main.tscn` still carries `offset_*` on every control, but **none of it is what
+you see**. `_layout_ui()` overwrites the position and size of every HUD node from
+the live viewport size, and it runs on `size_changed`. Editing offsets in the
+editor changes the editor preview and nothing else — change `_layout_ui()`.
+
+The screen is three regions that never overlap: a **top strip** across the full
+width, a **right sidebar**, and a **full-width bottom bar**. The sidebar stops
+where the bottom bar starts, which is what gives the toolbar room for every
+tool; the old fixed layout ran the speed buttons straight over the route panel.
+Vertical space is claimed sidebar-first — its contents have a real minimum — and
+the flight log absorbs whatever is left over. Sizing the log first is what used
+to push the route list out through the bottom of its own panel.
+
+Two `Panel` backdrops (`hud_top`, `hud_bottom`) sit behind the text and are
+`move_child(_, 0)`'d to the back, because they are added after the scene's own
+controls. In-world `draw_string()` labels get their own plate via
+`_plate_string()` — an outline still loses contrast against desert tan or snow,
+a plate cannot.
+
 ### The grid is larger than the airport
 
 `AirportGrid` covers 44x26 cells, but only `START_TRACT` — the original fixed
@@ -119,6 +140,17 @@ effectively invisible. `Render3D.PLANE_SCALE_FUDGE` multiplies it, exactly as
 the old 2D renderer drew a 21px narrowbody against a 32px tile. Same rule as
 `REVENUE_SCALE` below: keep the lie in that one constant.
 
+**Placement has an axis, and the concourse finds its own.** Anything wider than
+one tile reads `build_rot` (0 east, 1 south), flipped with **Q** — `R` is the
+Runway tool and moving it would invalidate the shortcut sheet. Concourse tiles
+are placed one at a time and are *not* rotated by the player: `_build_terminals()`
+merges adjacent tiles into runs on whichever axis is longer, so a north-south
+concourse renders as one building rather than a column of huts. Ties go
+east-west, which keeps every pre-existing layout rendering exactly as it did.
+Everything the sim reads off a stand — `stand_park_cell`, `stand_is_connected`,
+`stand_is_contact` — walks neighbours rather than assuming an axis. Keep it that
+way.
+
 **Pausing is an undo window, and demolition costs money.** Every purchase routes
 through `_spend()`, which records it in `pause_ledger` while paused. Demolishing
 or selling it during that same pause refunds the full amount; resuming time is
@@ -130,6 +162,16 @@ for selling facilities, which are equipment and genuinely resaleable.
 mirrors the plain text to stdout and the balance-run verification below greps
 that output, so putting bbcode into `log_lines` would corrupt the documented
 check. The timestamp's own brackets are escaped as `[lb]`.
+
+**The bank lends against reputation, not assets.** `credit_limit()` is
+`LOAN_LIMIT_PER_REP * reputation`, so a well-run airport can borrow into its next
+expansion and a failing one cannot borrow out of trouble — and an overdrawn day
+costs reputation, which *narrows* the facility. Interest is charged daily in
+`end_of_day()` before upkeep and nothing amortises automatically. The rate has to
+stay well under what capital returns at `REVENUE_SCALE` (a runway pays back
+around 6-7%/day) or borrowing is never worth doing, and far enough under that
+debt is not simply free. Borrowing and repaying deliberately bypass `_spend()`:
+they are not purchases and there is nothing to undo.
 
 **`REVENUE_SCALE` is a deliberate lie.** Capital costs in `Main.gd` are real
 2020s figures (runway pavement ~$2,500/linear ft, ATC tower ~$28M). Real
@@ -170,8 +212,15 @@ is therefore invisible to it, and a crash lived in the runway heading readout
 until a human selected the tool. Cover that path too:
 
 ```bash
-godot --headless --path . --fixed-fps 60 res://ToolSweep.tscn 2>&1 | grep "SCRIPT ERROR"
+godot --headless --path . --fixed-fps 60 res://ToolSweep.tscn 2>&1 | grep -E "SCRIPT ERROR|FAILED"
 ```
+
+`ToolSweep` also carries the invariants no headless *simulation* run can reach,
+because they need a cursor, a window or a button: land ownership, both placement
+axes, borrowing and repayment, and the HUD layout at three window sizes. Its
+assertions print `LAND CHECK FAILED` and `push_error`, so grep for `FAILED` as
+well as `SCRIPT ERROR`. When adding one, break it deliberately once and confirm
+it reports — an assertion that never runs is worse than no assertion.
 
 GDScript gotchas that have cost real time here: `clamp()` and
 `Dictionary.get()` return `Variant`, so `var x := clamp(...)` fails the

@@ -69,9 +69,11 @@ than adding new mechanics.
 Ordered cheap-knob-first, so each can be judged before the next lands.
 
 **Already landed and needing a play session to judge:** demolition now *costs*
-a flat `COST_DEMOLISH_TILE` per tile rather than refunding, and anything bought
-during a pause can be undone in full until time resumes. Both are new balance
-levers that have never been played against.
+a flat `COST_DEMOLISH_TILE` per tile rather than refunding, anything bought
+during a pause can be undone in full until time resumes, and the bank will lend
+up to $40M against full reputation. All three are new balance levers that have
+never been played against — the loan rate especially, since the headless run
+never borrows.
 
 - [ ] Land holding cost ⚠️. Buying tracts is pure upside once affordable; a small
       per-tile upkeep makes *when* you expand a decision. **S**
@@ -82,10 +84,12 @@ levers that have never been played against.
 - [ ] Fuel price fluctuation ⚠️. Recurring pressure on margins. **S**
 - [ ] Difficulty settings ⚠️. Starting cash and demand multipliers. Also the
       cheapest way to explore the balance questions below. **S**
-- [ ] Loans and financing ⚠️. $28M starting cash against $18M per concourse
-      section makes early choices brutal; debt would allow ambition and add a
-      failure path that is not purely reputation. The single highest-leverage
-      economy change. **M**
+- [x] Loans and financing ⚠️. Done: the bank lends `LOAN_LIMIT_PER_REP` per point
+      of reputation at 0.6%/day, charged in `end_of_day()` before upkeep, repaid
+      whenever the player chooses. The failure path is indirect rather than a
+      second lose condition — an overdrawn day costs reputation, which shrinks
+      the credit limit. **Never played against; the rate and the ceiling are both
+      guesses.**
 - [ ] Counter-offers on airline contracts ⚠️. Accept/decline is binary today;
       negotiating rate or volume adds a decision. **M**
 - [ ] Cargo flights ⚠️. A second demand stream wanting stands but no concourse,
