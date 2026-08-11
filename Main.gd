@@ -2030,14 +2030,18 @@ func _settle_at_stand(p: Dictionary, dt: float) -> void:
 	if stand == null:
 		return
 
+	# Drive onto the marks, do not slide onto them. The first version moved `pos`
+	# while easing `heading` separately, so the aircraft crabbed sideways across
+	# the stand — it was translating in one direction while pointing in another.
+	# move_toward_point() sets heading from the direction of travel, exactly as
+	# every other taxi leg does, so the nose leads the way in.
 	var want: Vector2 = grid.stand_park_point(stand)
-	var offset: Vector2 = want - p["pos"]
-	var creep := PARK_CREEP_SPEED * dt
-	if offset.length() <= creep:
-		p["pos"] = want
-	else:
-		p["pos"] = p["pos"] + offset.normalized() * creep
+	if not move_toward_point(p, want, PARK_CREEP_SPEED, dt):
+		return
 
+	# On the marks: now swing to the stand's own heading. This is the only part
+	# that should ever rotate without translating, and it is what a real
+	# aircraft's final turn onto the stand looks like.
 	var target: float = grid.stand_park_heading(stand)
 	if is_nan(target):
 		return

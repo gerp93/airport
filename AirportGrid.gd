@@ -1038,34 +1038,34 @@ func seed_starter_airport() -> void:
 	# find. A single-width spine deadlocks head-on traffic almost immediately.
 	for x in range(4, 22):
 		place_taxiway(Vector2i(x, 10))
-	# The apron is TWO rows deep, not one. The old layout put its stands straight
-	# onto a single through taxiway; a pier pushes them back behind service lanes
-	# instead, and a lane that empties into one row deadlocks the moment two
-	# aircraft want stands off the same lane. Two rows give the pair somewhere to
-	# pass, which is the whole reason the parallel taxiway exists further out.
+	# Apron, parallel taxiway and the two links between them — the same loop the
+	# pre-pier layout used, and the reason it never deadlocked. Every stand below
+	# opens straight onto the apron row, so no aircraft ever enters a cul-de-sac.
+	# Hanging stands off single-width service lanes instead cost 6-7 gridlocks a
+	# run; widening those lanes fixed it but read as a double-width taxiway.
 	for x in range(8, 21):
 		place_taxiway(Vector2i(x, 7))
-		place_taxiway(Vector2i(x, 8))
 	place_taxiway(Vector2i(4, 11))
 	place_taxiway(Vector2i(19, 11))
-	place_taxiway(Vector2i(8, 9))
-	place_taxiway(Vector2i(20, 9))
+	# Links between the apron and the parallel taxiway. Three, not two: with only
+	# the ends joined, a departure pushing back met an arrival head-on and the
+	# nearest detour was the full length of the apron, which is what "gridlocked
+	# outbound" was. A middle link gives blocked traffic somewhere to go without
+	# widening anything.
+	for y in [8, 9]:
+		for x in [8, 13, 20]:
+			place_taxiway(Vector2i(x, y))
 
 	# The landside spine, north to south: road in from the map edge, car parks
-	# beside it, the terminal hall across the top, then one concourse pier hanging
-	# off it at right angles with stands down BOTH flanks. Stands touch the pier,
-	# never the hall — that is the whole shape of the building now.
+	# beside it, the hall across the top, then TWO piers hanging off it at right
+	# angles — which is the 1-to-N relationship the building model exists for —
+	# with a stand in the gap between them and one outboard of each. Every stand
+	# touches a pier and nothing touches the hall.
 	place_road(Vector2i(13, 0))
 	place_parking(Vector2i(12, 0))
 	place_parking(Vector2i(14, 0))
 	place_terminal(building_cells(Vector2i(10, 1), TERMINAL_SIZE, 0), 0)
-	place_concourse(building_cells(Vector2i(12, 3), CONCOURSE_SIZE, 0), 0)
-
-	# A service lane down each flank, TWO wide, feeding the apron rows below. One
-	# wide deadlocked: a lane serving two stands is a cul-de-sac, and two aircraft
-	# wanting stands off the same lane had nowhere to pass and were towed.
-	for y in range(3, 7):
-		for x in [8, 9, 15, 16]:
-			place_taxiway(Vector2i(x, y))
-	for anchor in [Vector2i(10, 3), Vector2i(10, 5), Vector2i(13, 3), Vector2i(13, 5)]:
+	place_concourse(building_cells(Vector2i(11, 3), CONCOURSE_SIZE, 0), 0)
+	place_concourse(building_cells(Vector2i(14, 3), CONCOURSE_SIZE, 0), 0)
+	for anchor in [Vector2i(9, 5), Vector2i(12, 5), Vector2i(15, 5)]:
 		place_stand(stand_cells_for(anchor, 0), 0)

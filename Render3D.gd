@@ -721,8 +721,7 @@ func _build_tiles() -> void:
 
 		match type:
 			AirportGrid.TileType.TAXIWAY:
-				_add("taxi", "box", _mat("taxi", COL_TAXIWAY),
-					Vector3(t, H_PAVEMENT, t), w3(centre, H_PAVEMENT * 0.5))
+				_build_taxiway_tile(cell, centre)
 			AirportGrid.TileType.ROAD:
 				_build_road_tile(cell, centre)
 			AirportGrid.TileType.PARKING:
@@ -734,6 +733,94 @@ func _build_tiles() -> void:
 						Vector3(1.4, 0.6, t * 0.62), w3(centre + Vector2(off, 0.0), H_MARKING))
 			AirportGrid.TileType.CONCOURSE:
 				pass  # Merged into runs below, so a concourse reads as one building.
+
+
+# --- taxiways ---------------------------------------------------------------
+#
+# Autotiled from a five-piece kit. Each piece is a 44-unit square authored with
+# its pavement running north-south and its origin at the centre of its NORTH
+# edge, so a piece is positioned at its tile's north edge and rotated about that
+# point. Model -z/-x line up with grid north/west, which is why the mask below
+# can be read straight off the grid with no axis translation.
+#
+# Which sides each piece opens on, at zero rotation. Measured off the pavement
+# meshes' own bounds rather than trusted from the file names — `corner` opens
+# north and west, which the naming did not make obvious.
+const TX_N := 1
+const TX_E := 2
+const TX_S := 4
+const TX_W := 8
+const TX_PIECES := [
+	# mask, model, and whether a lone stub should use it
+	{"mask": TX_S, "name": "end"},
+	{"mask": TX_N | TX_S, "name": "mid"},
+	{"mask": TX_N | TX_W, "name": "corner"},
+	{"mask": TX_N | TX_S | TX_W, "name": "tee"},
+	{"mask": TX_N | TX_E | TX_S | TX_W, "name": "cross"},
+]
+const TX_MODELS := {
+	"mid": preload("res://assets/models/taxiway/mid.glb"),
+	"end": preload("res://assets/models/taxiway/end.glb"),
+	"corner": preload("res://assets/models/taxiway/corner.glb"),
+	"tee": preload("res://assets/models/taxiway/tee.glb"),
+	"cross": preload("res://assets/models/taxiway/cross.glb"),
+}
+# The kit is authored for a 44-unit tile; the world's is 32.
+const TX_MODEL_TILE := 44.0
+
+
+# One yaw step is +90 degrees about Y, which carries model north to model west.
+# In mask terms every set bit i moves to (i + 3) % 4.
+func _tx_rot(mask: int) -> int:
+	var out := 0
+	for i in 4:
+		if mask & (1 << i):
+			out |= 1 << ((i + 3) % 4)
+	return out
+
+
+func _build_taxiway_tile(cell: Vector2i, centre: Vector2) -> void:
+	# Only other taxiways count as connections. That is deliberate: a taxiway
+	# cell that merely abuts a runway is a dead end here, so it gets the `end`
+	# piece — and the `end` piece is the one carrying a hold bar, which is
+	# exactly the marking that belongs where a taxiway meets a runway.
+	var want := 0
+	for pair in [[Vector2i(0, -1), TX_N], [Vector2i(1, 0), TX_E],
+			[Vector2i(0, 1), TX_S], [Vector2i(-1, 0), TX_W]]:
+		var d: Vector2i = pair[0]
+		if grid.tile_type(cell + d) == AirportGrid.TileType.TAXIWAY:
+			want |= int(pair[1])
+
+	var chosen := ""
+	var steps := 0
+	for piece in TX_PIECES:
+		var m: int = piece["mask"]
+		for k in 4:
+			if m == want:
+				chosen = piece["name"]
+				steps = k
+				break
+			m = _tx_rot(m)
+		if chosen != "":
+			break
+	if chosen == "":
+		# An isolated stub matches nothing; a lone `end` still reads correctly.
+		chosen = "end"
+
+	var s: float = AirportGrid.TILE / TX_MODEL_TILE
+	var holder := Node3D.new()
+	# Lifted onto the pavement band. The kit lays its pavement flat at y=0, real
+	# aerodrome fashion, which put it exactly coplanar with the ground and lost
+	# every z-fight — the taxiways instantiated correctly and drew nothing at all.
+	holder.position = w3(centre, H_PAVEMENT)
+	holder.rotation.y = float(steps) * PI * 0.5
+	var m3: Node3D = (TX_MODELS[chosen] as PackedScene).instantiate()
+	m3.scale = Vector3.ONE * s
+	# The piece hangs south from its origin, so back it up half a tile to sit
+	# centred on the cell once rotated.
+	m3.position = Vector3(0.0, 0.0, -AirportGrid.TILE * 0.5)
+	holder.add_child(m3)
+	_tiles_root.add_child(holder)
 
 
 # A road is a narrow ribbon rather than a full tile of tarmac, so landside stops
