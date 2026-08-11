@@ -777,7 +777,13 @@ const TX_MODELS := {
 # overrun into the neighbouring cell, which is harmless — they are margin, and
 # neighbouring pieces' shoulders are the same material at the same height.
 const TX_MODEL_TILE := 44.0
-const TX_SCALE := 1.0
+# Must tile EXACTLY, so this is forced: one piece covers one cell and no more.
+# Rendering at native scale to get a wider pavement overlapped every neighbour
+# by 12 units, and since each piece carries its own centreline, edge stripes and
+# lights, the overlap drew all of them two and three times over — the apron
+# turned into a scribble of doubled markings. Whatever the pavement ends up
+# looking like, it cannot be bought by letting the pieces overrun each other.
+const TX_SCALE := AirportGrid.TILE / TX_MODEL_TILE
 
 
 # One yaw step is +90 degrees about Y, which carries model north to model west.
