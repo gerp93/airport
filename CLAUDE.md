@@ -70,6 +70,17 @@ post-multiplies and silently skews rotated runways. `set_terrain()` calls
 `_mats.clear()`, so it must invalidate **all three** tiers or live batches keep
 rendering through orphaned materials.
 
+**The control tower is the one building nothing places.** It is bought in the ops
+panel as a *facility*, so the simulation has no idea where it stands and
+`Render3D` picks the site itself: the nearest empty tile to the apron, preferring
+one that stands clear on all four sides. The site is recomputed on every layout
+rebuild, so building over it relocates the tower rather than leaving it inside a
+new taxiway. `Main` pushes the count through `set_tower_count()` every frame —
+a no-op unless the number moved — because buying, selling, undoing and loading
+would otherwise each have to remember to invalidate the renderer. One building
+however many units are commissioned; further units are controllers, not a second
+tower.
+
 Stands stay individual `MeshInstance3D`s on purpose: `sync_stands()` recolours
 them every frame, and batching would force per-instance colour. Aircraft use `assets/models/widebody-airliner.glb`, whose
 `livery` material is separate from `shell` — so per-airline colours are a

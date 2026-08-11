@@ -66,6 +66,7 @@ func _ready() -> void:
 	_check_park_heading(main)
 	_check_stand_routing(main)
 	_check_finance(main)
+	_check_tower(main)
 	_check_layout(main)
 	print("tool sweep complete")
 	get_tree().quit()
@@ -222,6 +223,40 @@ func _check_finance(main) -> void:
 	main.repay(MainScript.LOAN_STEP)
 	_expect(main.loan_principal == 0, "repaying with no debt must be a no-op")
 	main.money = cash0
+
+
+# The tower is the one building the player never places, so nothing else would
+# notice if the renderer sited it on top of something or left it standing in a
+# taxiway the player laid over it.
+func _check_tower(main) -> void:
+	var r = main.render3d
+	var grid = main.grid
+	var AG = load("res://AirportGrid.gd")
+
+	r.set_tower_count(0)
+	r.rebuild_if_dirty()
+	_expect(r._tower_root.get_child_count() == 0, "no tower until one is commissioned")
+
+	r.set_tower_count(1)
+	r.rebuild_if_dirty()
+	_expect(r._tower_root.get_child_count() == 1, "a commissioned tower must be built")
+
+	r.set_tower_count(3)
+	r.rebuild_if_dirty()
+	_expect(r._tower_root.get_child_count() == 1,
+		"extra tower units are capacity, not a second building")
+
+	var site: Vector2i = r._tower_site()
+	_expect(grid.tile_type(site) == AG.TileType.EMPTY, "the tower must stand on an empty tile")
+	_expect(grid.is_buildable(site), "the tower must stand on owned land")
+
+	grid.place_taxiway(site)
+	r.mark_layout_dirty()
+	r.rebuild_if_dirty()
+	var moved: Vector2i = r._tower_site()
+	_expect(moved != site, "building over the tower's site must move it")
+	_expect(grid.tile_type(moved) == AG.TileType.EMPTY,
+		"the relocated tower must still be on an empty tile")
 
 
 # The HUD is laid out from the live viewport size, so a window the layout has

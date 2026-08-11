@@ -28,6 +28,18 @@ const PLANE_MODELS := {
 }
 const MODEL_LENGTHS := {"R": 30.0, "N": 40.0, "W": 66.0}
 
+# The model stands with its base already at y=0 and its cab at 52 units, on a
+# 25.6 x 17.8 footprint. At native scale that is only 2.6x the concourse, which
+# at play zoom read as a chimney on the terminal roof rather than as a landmark.
+#
+# Scaled up it is the same deliberate lie as PLANE_SCALE_FUDGE: 83 units is
+# 1,500ft at FEET_PER_TILE, which is nonsense, but the concourse is already
+# 375ft and the aircraft are oversized to match. The whole vertical scale is
+# exaggerated, consistently. The footprint spills a little past its tile, which
+# is why the site below wants empty neighbours.
+const TOWER_MODEL := preload("res://assets/models/control-tower.glb")
+const TOWER_SCALE := 1.6
+
 # --- projection -------------------------------------------------------------
 
 # 2D world coords map to 3D as (x, height, y): the sim's screen-down axis becomes
@@ -116,6 +128,8 @@ var _tiles_root: Node3D
 var _terminal_root: Node3D
 var _runway_root: Node3D
 var _stand_root: Node3D
+var _tower_root: Node3D
+var _tower_count := 0
 
 var _scenery_built := false
 var _ground_mask := -1
@@ -137,7 +151,7 @@ func _ready() -> void:
 	add_child(_static_root)
 	# One root per rebuild tier, so a layout change never touches scenery.
 	for holder in ["_ground_root", "_scenery_root", "_tiles_root", "_terminal_root",
-			"_runway_root", "_stand_root"]:
+			"_runway_root", "_stand_root", "_tower_root"]:
 		var n := Node3D.new()
 		_static_root.add_child(n)
 		set(holder, n)
@@ -497,6 +511,7 @@ func _rebuild_layout() -> void:
 	_clear(_terminal_root)
 	_clear(_runway_root)
 	_clear(_stand_root)
+	_clear(_tower_root)
 	_stand_nodes.clear()
 
 	_build_tiles()
@@ -506,6 +521,7 @@ func _rebuild_layout() -> void:
 	_build_runways()
 	_flush_batches(_runway_root)
 	_build_stands()
+	_build_tower()
 
 
 # Terrain is cosmetic and arrives only once the player picks a region, which is
@@ -910,6 +926,101 @@ func _paint_designator(text: String, at: Vector2, facing: Vector2) -> void:
 	l.rotation_degrees = Vector3(-90.0, rad_to_deg(-facing.angle() - PI * 0.5), 0.0)
 	l.position = w3(at, H_MARKING)
 	_runway_root.add_child(l)
+
+
+# The tower is bought in the ops panel, not placed with a tool, so nothing in the
+# simulation knows where it stands and the renderer has to choose. Pushed through
+# a setter rather than read every frame so a facility purchase costs one rebuild,
+# not one per frame — and so load, undo and sell all reach it without each having
+# to remember to.
+func set_tower_count(n: int) -> void:
+	if n == _tower_count:
+		return
+	_tower_count = n
+	mark_layout_dirty()
+
+
+# One building however many units are commissioned. Further units are
+# controllers and equipment, not a second tower — two identical towers side by
+# side would read as a bug rather than as capacity.
+func _build_tower() -> void:
+	if _tower_count <= 0 or grid == null:
+		return
+	var cell := _tower_site()
+	if cell == AirportGrid.NOWHERE:
+		return
+	var model: Node3D = TOWER_MODEL.instantiate()
+	model.scale = Vector3.ONE * TOWER_SCALE
+	model.position = w3(grid.cell_to_world(cell))
+	_tower_root.add_child(model)
+
+
+# The nearest empty tile to the apron that the tower can stand on. Scored rather
+# than filtered, so the search always returns something: a tile standing clear of
+# everything wins, then one merely off the movement area, then any empty tile at
+# all on a crowded field.
+#
+# Rerun on every layout rebuild, so building over its spot moves it rather than
+# leaving a tower standing inside a new taxiway.
+func _tower_site() -> Vector2i:
+	var focus := _apron_focus()
+	var best := AirportGrid.NOWHERE
+	var best_score := INF
+	var b: Rect2i = grid.owned_bounds()
+	for y in range(b.position.y, b.position.y + b.size.y):
+		for x in range(b.position.x, b.position.x + b.size.x):
+			var c := Vector2i(x, y)
+			if not grid.is_buildable(c) or grid.tile_type(c) != AirportGrid.TileType.EMPTY:
+				continue
+			# Distance is only the tie-break within a tier, so the tier weight has
+			# to exceed any distance the field can produce — the grid's diagonal
+			# is about 51 cells.
+			var score: float = float(_tower_penalty(c)) * 1000.0 \
+				+ Vector2(c - focus).length()
+			if score < best_score:
+				best_score = score
+				best = c
+	return best
+
+
+# 0 stands free on all four sides — the tower is a landmark and its base spills
+# past its own tile, so touching the terminal made it look like a rooftop mast.
+# 1 is merely off the taxiways and runways. 2 is anywhere it fits at all.
+func _tower_penalty(c: Vector2i) -> int:
+	var touches_movement := false
+	var touches_anything := false
+	for n in grid.neighbors(c):
+		# Annotated, not inferred: `grid` is untyped, so this returns Variant and
+		# `:=` fails the "inferred from Variant" check.
+		var t: int = grid.tile_type(n)
+		if t == AirportGrid.TileType.EMPTY:
+			continue
+		touches_anything = true
+		if t == AirportGrid.TileType.TAXIWAY or t == AirportGrid.TileType.RUNWAY:
+			touches_movement = true
+	if touches_movement:
+		return 2
+	return 1 if touches_anything else 0
+
+
+# Controllers watch the apron, so that is what the tower sits beside: the stands
+# if there are any, else the concourse, else the middle of what is owned.
+func _apron_focus() -> Vector2i:
+	var sum := Vector2.ZERO
+	var n := 0
+	for g in grid.stands:
+		for c in g["cells"]:
+			sum += Vector2(c)
+			n += 1
+	if n == 0:
+		for c in grid.tiles:
+			if grid.tile_type(c) == AirportGrid.TileType.TERMINAL:
+				sum += Vector2(c)
+				n += 1
+	if n == 0:
+		var b: Rect2i = grid.owned_bounds()
+		return b.position + b.size / 2
+	return Vector2i((sum / float(n)).round())
 
 
 func _build_stands() -> void:

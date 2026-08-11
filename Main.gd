@@ -3328,6 +3328,11 @@ func _update_hud() -> void:
 func _sync_world() -> void:
 	if render3d == null:
 		return
+	# The tower is a facility, not a placement, so nothing marks the layout dirty
+	# when one is commissioned. Pushing the count each frame is what makes buying,
+	# selling, undoing and loading all reach the renderer without each site having
+	# to remember to; the setter itself is a no-op unless the number moved.
+	render3d.set_tower_count(int(facilities.get("tower", 0)))
 	render3d.rebuild_if_dirty()
 	render3d.sync_stands()
 	render3d.sync_planes(_plane_records())

@@ -107,8 +107,10 @@ Depends on Phase 1 batching.
 - [ ] Per-class aircraft meshes. One widebody mesh currently stands in for
       Regional and Narrowbody at different scales. Generatable — see
       *Generated assets* below. **M**
-- [ ] Real building meshes: concourse with a roofline and glazing, control tower,
-      jetbridges, hangars, service vehicles. Currently untextured boxes. **L**
+- [ ] Real building meshes. Done so far: the concourse (roofline, glazing, jet
+      bridges, built parametrically because a run is any length) and the control
+      tower (an authored `.glb`, flat-material and untextured like everything
+      else). Still boxes or absent: hangars, service vehicles, fuel farm. **L**
 - [ ] Sound. None exists. Engine noise, ground ambience, weather beds, UI
       feedback, an emergency alert. Generatable — see below. **L**
 - [ ] Day/night cycle. Light angle and colour over the day timer. Renderer only,
