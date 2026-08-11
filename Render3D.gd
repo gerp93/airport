@@ -994,10 +994,25 @@ func _build_stands() -> void:
 				w3(grid.cell_to_world(c), H_STAND * 0.5), _mat("standfree", COL_STAND_FREE)))
 		_stand_nodes[g["id"]] = nodes
 
+		# The stand mesh is NOT centred: its jet-bridge collar sits at the model
+		# origin and the bridge reaches out along +z, so like the pier it is
+		# anchored at the edge that meets the building. Placing it centred put
+		# every bridge on the same side of the pier regardless of which flank the
+		# stand was on.
+		#
+		# Orientation is derived, not stored. `stand_park_heading` already points
+		# at the pier — or, failing that, away from the taxiway — and reusing it
+		# means the bridge and the aircraft nose can never disagree.
+		var to_pier := Vector2(0.0, -1.0)
+		var h: float = grid.stand_park_heading(g)
+		if not is_nan(h):
+			to_pier = Vector2(cos(h), sin(h))
 		var n: Node3D = STAND_MODEL.instantiate()
-		n.position = w3(_cells_centre(g["cells"]), H_STAND)
-		# Square footprint, so rot only turns the jet bridge to face the pier.
-		n.rotation.y = PI * 0.5 * float(int(g.get("rot", 0)))
+		# Half the 2x2 footprint is exactly one tile, so this is its near edge.
+		n.position = w3(_cells_centre(g["cells"]) + to_pier * t, H_STAND)
+		# Local +z must run from that edge back across the stand, away from the
+		# pier — the direction the bridge extends to reach the aircraft.
+		n.rotation.y = atan2(-to_pier.x, -to_pier.y)
 		_stand_root.add_child(n)
 
 
