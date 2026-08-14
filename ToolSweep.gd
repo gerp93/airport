@@ -136,13 +136,21 @@ func _check_rotation(main) -> void:
 	_expect(grid.get_concourse(cid)["cells"][0] == Vector2i(24, 3),
 		"a concourse must be stored root-first, from the end that meets the hall")
 
+	# Both hall checks run BEFORE anything else is placed nearby, or they pass
+	# and fail for reasons that have nothing to do with the rule.
+	#
+	# Under the hall's south face, far enough east that the pier at x=24 is not a
+	# neighbour: no bridge, meshes interpenetrating. Refused.
+	_expect(not grid.can_place_stand(grid.stand_cells_for(Vector2i(26, 3), 0)),
+		"a stand touching only the hall must be refused")
+	# The same face, but with the pier alongside — an ordinary stand at the root
+	# of a pier. Refusing this was too blunt.
+	_expect(grid.can_place_stand(grid.stand_cells_for(Vector2i(22, 3), 0)),
+		"a stand against the hall AND a pier must be allowed")
+
 	# Stands attach to the PIER, not to the hall.
 	var by_pier = grid.get_stand(grid.place_stand(grid.stand_cells_for(Vector2i(25, 4), 0), 0))
 	_expect(grid.stand_is_contact(by_pier), "a stand against a pier is a contact stand")
-	# Directly under the hall's south face — the placement that used to be
-	# allowed, gave no bridge, and left the two meshes interpenetrating.
-	_expect(not grid.can_place_stand(grid.stand_cells_for(Vector2i(22, 3), 0)),
-		"a stand must not be placeable against the hall itself")
 
 	# Demolishing the hall orphans its piers rather than destroying them.
 	grid.demolish(Vector2i(22, 1))

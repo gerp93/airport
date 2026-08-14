@@ -568,16 +568,21 @@ func stand_cells_for(anchor: Vector2i, rot: int = 0) -> Array:
 func can_place_stand(cells: Array) -> bool:
 	if not _cells_are_free(cells):
 		return false
-	# Never against the hall. A stand touching the terminal gets no jet bridge —
-	# only piers give those — so it was already useless there, and the stand mesh
-	# and the hall mesh both overhang their own footprints enough to visibly
-	# interpenetrate. Refusing the placement fixes the rule and the overlap at
-	# once.
+	# A stand may touch the hall, but only if it is really served by a PIER. On
+	# its own against the hall it gets no jet bridge — only piers give those — so
+	# it is useless there, and the two meshes overhang their own footprints
+	# enough to visibly interpenetrate. Alongside a pier that reaches the hall it
+	# is a perfectly ordinary stand, and refusing it was too blunt.
+	var touches_hall := false
+	var touches_pier := false
 	for c in cells:
 		for n in neighbors(c):
-			if tile_type(n) == TileType.TERMINAL:
-				return false
-	return true
+			match tile_type(n):
+				TileType.TERMINAL:
+					touches_hall = true
+				TileType.CONCOURSE:
+					touches_pier = true
+	return touches_pier or not touches_hall
 
 
 func place_stand(cells: Array, rot: int = 0) -> int:
