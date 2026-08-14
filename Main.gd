@@ -241,6 +241,8 @@ var last_day_revenue := 0
 var last_upkeep := 0
 var loan_principal := 0
 var last_interest := 0
+var sandbox := false
+var sandbox_btn: Button
 var facilities := {}
 var used := {"crew": 0, "fuel": 0, "term": 0, "mech": 0}
 var reputation := 100
@@ -395,6 +397,7 @@ func _ready() -> void:
 		var b: Button = $UI/StartPanel.get_node("Opt%d" % i)
 		b.pressed.connect(_choose_setup.bind(i))
 		_style_button(b)
+	_build_sandbox_toggle()
 	# Headless balance runs can't click, so they take the first region.
 	if _echo_log or _auto_sign:
 		_choose_setup(0)
@@ -713,6 +716,42 @@ func _update_closure_banner() -> void:
 	var pulse: float = 0.55 + 0.45 * absf(sin(time_elapsed * 2.2))
 	var sb: StyleBoxFlat = closure_banner.get_theme_stylebox("panel")
 	sb.border_color = Color(1.0, 0.45, 0.35, pulse)
+
+
+# --- sandbox ---
+#
+# Testing a layout meant playing the economy first: reaching the point where a
+# second pier is affordable takes most of a session, so anything about how the
+# buildings fit together was gated behind money that has nothing to do with it.
+#
+# Cash is topped back up every frame rather than the costs being waived. Nothing
+# else then has to know about sandbox at all — _spend(), the affordability
+# guards, the pause ledger and the confirmation thresholds all run exactly as
+# they do in a real game, so sandbox play still exercises the same code.
+const SANDBOX_CASH := 900_000_000
+
+
+func _build_sandbox_toggle() -> void:
+	sandbox_btn = Button.new()
+	sandbox_btn.focus_mode = Control.FOCUS_NONE
+	sandbox_btn.position = Vector2(28.0, 374.0)
+	sandbox_btn.size = Vector2(544.0, 34.0)
+	sandbox_btn.pressed.connect(_toggle_sandbox)
+	_style_button(sandbox_btn)
+	$UI/StartPanel.add_child(sandbox_btn)
+	_refresh_sandbox_btn()
+
+
+func _toggle_sandbox() -> void:
+	sandbox = not sandbox
+	_refresh_sandbox_btn()
+
+
+func _refresh_sandbox_btn() -> void:
+	if sandbox_btn == null:
+		return
+	sandbox_btn.text = "SANDBOX MODE: ON — unlimited cash" if sandbox \
+		else "Sandbox mode: off — click for unlimited cash"
 
 
 # --- financing ---
@@ -2919,6 +2958,10 @@ func _process(delta: float) -> void:
 		_simulate(dt)
 		if reputation <= 0:
 			_end_run()
+	# Topped up rather than made free, so every cost, guard and ledger entry
+	# still runs — see SANDBOX_CASH.
+	if sandbox:
+		money = SANDBOX_CASH
 	_update_hud()
 	_update_ops_ui()
 	_update_bank_ui()
@@ -3029,6 +3072,7 @@ func save_game(slot: int = -1) -> void:
 		"day": day, "day_time": day_time, "day_revenue": day_revenue,
 		"last_day_revenue": last_day_revenue, "last_upkeep": last_upkeep,
 		"loan_principal": loan_principal, "last_interest": last_interest,
+		"sandbox": sandbox,
 		"facilities": facilities.duplicate(),
 		"routes": routes.duplicate(true),
 		"arrival_queue": arrival_queue.duplicate(true),
@@ -3088,6 +3132,8 @@ func load_game(slot: int = -1) -> void:
 	# existed simply restores as an airport with no debt, which is exactly right.
 	loan_principal = d.get("loan_principal", 0)
 	last_interest = d.get("last_interest", 0)
+	sandbox = d.get("sandbox", false)
+	_refresh_sandbox_btn()
 	facilities = d.get("facilities", facilities)
 	# No aircraft are restored, so nothing is holding ground support.
 	for k in used:
@@ -3279,6 +3325,8 @@ func _update_route_ui() -> void:
 
 func _update_hud() -> void:
 	money_label.text = "Cash: %s" % money_str(money)
+	if sandbox:
+		money_label.text = "SANDBOX — cash unlimited"
 	if loan_principal > 0:
 		money_label.text += "   ·   debt %s" % money_str(loan_principal)
 	rep_label.text = "Reputation: %d" % reputation

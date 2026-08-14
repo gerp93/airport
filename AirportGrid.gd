@@ -657,10 +657,34 @@ func stand_park_point(g: Dictionary) -> Vector2:
 	# this lives here rather than in the renderer — the parked aircraft and the
 	# painted line have to agree.
 	var h := stand_park_heading(g)
-	if not is_nan(h):
-		var fwd := Vector2(cos(h), sin(h))
-		centre -= Vector2(-fwd.y, fwd.x) * (TILE * 0.5)
-	return centre
+	if is_nan(h):
+		return centre
+	var fwd := Vector2(cos(h), sin(h))
+	var perp := Vector2(-fwd.y, fwd.x)
+	# Either sign lands on a cell centre, so the choice is free — and it matters,
+	# because the stand mesh is wider than the half-footprint once shifted and
+	# overhangs whatever is on that side. At a pier root that neighbour is the
+	# terminal hall, and the two visibly interpenetrated. Shift AWAY from a
+	# building if one side has one.
+	var sign := -1.0
+	if _stand_side_blocked(g, -perp) and not _stand_side_blocked(g, perp):
+		sign = 1.0
+	return centre + perp * (sign * TILE * 0.5)
+
+
+# Is there a building immediately beyond the stand on this side? Checked one
+# cell out from each of the stand's own cells, since a 2x2 presents two of them
+# to each side.
+func _stand_side_blocked(g: Dictionary, dir: Vector2) -> bool:
+	var step := Vector2i(roundi(dir.x), roundi(dir.y))
+	for c in g["cells"]:
+		var probe: Vector2i = Vector2i(c) + step
+		if probe in g["cells"]:
+			continue
+		var t := tile_type(probe)
+		if t == TileType.TERMINAL or t == TileType.CONCOURSE:
+			return true
+	return false
 
 
 # Which way a parked aircraft's nose should point. Real stands are nose-in, so a
