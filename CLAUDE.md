@@ -70,10 +70,31 @@ post-multiplies and silently skews rotated runways. `set_terrain()` calls
 `_mats.clear()`, so it must invalidate **all three** tiers or live batches keep
 rendering through orphaned materials.
 
+**No authored `.glb` is ever instantiated per placement.** They are not one mesh
+each — the taxiway pieces carry 35-82 `MeshInstance3D` children, the stand 68, the
+tower 144 — so instancing one scene per object took the rebuild to 1740 nodes and
+14ms, on every single tile placed. `_add_model()` accumulates a transform instead;
+`_welded_mesh()` welds each model once into a single `ArrayMesh` with one surface
+per material, and `_flush_models()` emits one `MultiMesh` per model. 62 nodes and
+2.2ms, and a painted tile now costs a `Transform3D` rather than a subtree.
+
+Anything that varies per placement goes in the **instance** transform, not the
+weld — that is how every pier stretches to its own length off one shared mesh.
+The weld's `pre` argument is for what is genuinely constant (the taxiway kit's
+scale-to-tile and half-length offset) and is part of the cache key's meaning.
+Welded meshes survive `set_terrain()`, unlike `_mats`: their materials come out
+of the `.glb` and are never rebuilt against the palette.
+
 **The control tower is the one building nothing places.** It is bought in the ops
 panel as a *facility*, so the simulation has no idea where it stands and
-`Render3D` picks the site itself: the nearest empty tile to the apron, preferring
-one that stands clear on all four sides. The site is recomputed on every layout
+`Render3D` picks the site itself: the nearest empty tile to the movement area,
+preferring one that stands clear on all four sides. "Clear" is graded, not binary
+— a neighbouring *building* is disqualifying (weight 1000, so distance only breaks
+ties within that tier), while neighbouring *pavement* is merely unwanted (2.0 per
+side, since the base is 41 units across a 32-unit tile and overhangs). Standing
+over the movement area is the tower's whole job, so pavement must never
+disqualify a site: an early flat 6.0 nudge pushed the tower clean across the
+runway. The site is recomputed on every layout
 rebuild, so building over it relocates the tower rather than leaving it inside a
 new taxiway. `Main` pushes the count through `set_tower_count()` every frame —
 a no-op unless the number moved — because buying, selling, undoing and loading
@@ -81,8 +102,9 @@ would otherwise each have to remember to invalidate the renderer. One building
 however many units are commissioned; further units are controllers, not a second
 tower.
 
-Stands stay individual `MeshInstance3D`s on purpose: `sync_stands()` recolours
-them every frame, and batching would force per-instance colour. Aircraft use `assets/models/widebody-airliner.glb`, whose
+Stand *pads* stay individual `MeshInstance3D`s on purpose: `sync_stands()`
+recolours them every frame, and batching would force per-instance colour. The
+stand *model* sitting on the pad is welded and batched like every other. Aircraft use `assets/models/widebody-airliner.glb`, whose
 `livery` material is separate from `shell` — so per-airline colours are a
 material override, not an art pipeline.
 
@@ -152,15 +174,39 @@ effectively invisible. `Render3D.PLANE_SCALE_FUDGE` multiplies it, exactly as
 the old 2D renderer drew a 21px narrowbody against a 32px tile. Same rule as
 `REVENUE_SCALE` below: keep the lie in that one constant.
 
-**Terminals, concourses and stands are one mesh each, and their sizes are the
-meshes'.** `TERMINAL_SIZE` 6x2, `CONCOURSE_SIZE` 1x4, `STAND_SIZE` 2x2 are the
-authored footprints in tiles, which is why they are fixed-size entities rather
-than painted tiles — no merging, no stretching, one model per building. The
-hierarchy is load-bearing: a **hall** is landside, needs a road and is where
+**Terminals, concourses and stands are one mesh each.** `TERMINAL_SIZE` 6x2,
+`CONCOURSE_SIZE` 1x6, `STAND_SIZE` 2x3 are their footprints in tiles, which is why
+they are fixed-size entities rather than painted tiles — one model per building.
+The hierarchy is load-bearing: a **hall** is landside, needs a road and is where
 passenger capacity comes from; **piers** hang off it end-on and add no capacity
 of their own; **stands** attach to a *pier*, never to the hall, and only a stand
 touching a pier gets a jet bridge. Demolishing a hall orphans its piers rather
 than destroying them.
+
+Two of those three sizes are *not* the mesh's own, and both for a reason:
+
+- **A stand is three cells across a 56-unit mesh, and the odd number is the
+  point.** Its lead-in line has to land on a taxiway centreline, and centrelines
+  run down the middle of a cell — so the lead-in axis must be a cell centre. An
+  even width puts it on the grid line between two cells and needs a half-tile
+  correction, which then slides the mesh 16 units off centre in a 64-wide
+  footprint and leaves it overhanging the next tile by 12. At a pier root that
+  neighbour is the hall, and the two visibly interpenetrated. Three cells needs
+  no correction at all. The correction survives in `stand_park_point()` only as a
+  fallback for a stand turned across its own pier — the player's mistake, but an
+  unreachable stand is a worse answer than a shifted one.
+- **A pier is a design figure, stretched from a 30x120.5 mesh.** Six tiles takes
+  two stands per flank; four could only ever take one once stands widened.
+  `_place_pier()` scales **length only** — width and height are pinned to the
+  tile. Uniform scaling happened to work at four tiles (128/120.5 = 1.06) and was
+  luck: at six the same factor is 1.59 and the pier comes out 1.6 tiles wide,
+  straddling the stands on both flanks. `COST_CONCOURSE` is derived per tile from
+  `CONCOURSE_SIZE` so lengthening one cannot quietly discount it.
+
+**`stand_park_cell()` returns the cell the lead-in runs through**, not the first
+one touching a taxiway. `Render3D._on_stand_leadin()` branches the taxiway into
+exactly one cell of a stand, so taking any other routes the aircraft in one cell
+to the side of its own painted turn-off.
 
 `TileType`'s ordinals are serialized, so the old `TERMINAL` member (4) was
 *renamed* to `CONCOURSE` — which is what those tiles always functionally were,
@@ -171,8 +217,10 @@ saves therefore load with their buildings as concourses.
 than one tile reads `build_rot` (0 east, 1 south), flipped with **Q** — `R` is
 the Runway tool and moving it would invalidate the shortcut sheet. Both building
 meshes are authored with their long axis on the same axis, so a hall and a pier
-at the *same* rot are automatically at right angles to each other. A stand is
-square, so rot turns only its jet bridge.
+at the *same* rot are automatically at right angles to each other. A stand's
+three-cell width lies along the pier at the same rot, so the rule holds for all
+three — and rot genuinely moves a stand's footprint now, where a square one only
+turned its jet bridge.
 
 Everything the sim reads off a stand — `stand_park_cell`, `stand_is_connected`,
 `stand_is_contact`, `stand_park_heading` — walks neighbours rather than assuming
@@ -182,8 +230,16 @@ an axis. Keep it that way.
 old layout put its stands straight onto a through row. Behind a pier they sit
 off service lanes instead, and a single-width lane serving two stands is a
 cul-de-sac: two aircraft wanting stands off the same lane have nowhere to pass
-and get towed. The starter apron's flank lanes are two wide for exactly this
-reason, and it took three balance runs to find — the failure is intermittent.
+and get towed. The starter therefore puts one stand per lane, and it took three
+balance runs to find — the failure is intermittent.
+
+**Lane *depth* is the other half of that, and it is measured, not guessed.** A
+departure crosses the lane before it has anywhere to pass, so the number that
+matters is how many single-width cells lie between the stand's lead-in cell and
+the apron. Two is safe. Running the lane the full three cells of the stand's
+width instead — the obvious thing to do when stands widened — cost 5 gridlocks and
+2 tows a run. The starter's lanes are two cells for that reason, and the stand's
+other cells simply front onto grass and apron, which is what a real stand does.
 
 **Pausing is an undo window, and demolition costs money.** Every purchase routes
 through `_spend()`, which records it in `pause_ledger` while paused. Demolishing

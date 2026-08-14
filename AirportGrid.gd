@@ -215,7 +215,12 @@ func place_taxiway(c: Vector2i) -> void:
 # painted tiles, because both are single authored meshes: the sizes below are the
 # meshes' own dimensions in tiles, so a building is exactly one model.
 const TERMINAL_SIZE := Vector2i(6, 2)
-const CONCOURSE_SIZE := Vector2i(1, 4)
+# The pier is the one building whose length is not the mesh's own: it is stretched
+# along its run (see Render3D._place_pier), so this is a design figure rather than
+# an authored one. Six tiles takes two stands per flank — a four-tile pier could
+# only ever hold one, once stands went three cells across — which is what makes a
+# pier worth building over more stands straight off the apron.
+const CONCOURSE_SIZE := Vector2i(1, 6)
 
 
 # Footprint of a `size` building anchored at `anchor`. rot 1 swaps the axes, so a
@@ -555,10 +560,26 @@ func _restamp_runway(r: Dictionary) -> void:
 		_refresh_cell(c)
 
 
-# One stand size, taking any aircraft. The footprint is the stand mesh's own
-# 2x2, so a stand is exactly one model — and being square, `rot` changes only
-# which way the jet bridge faces, never which cells are occupied.
-const STAND_SIZE := Vector2i(2, 2)
+# One stand size, taking any aircraft. Two cells deep, which is the mesh's own
+# 62-unit length, and THREE cells across, which is deliberately wider than the
+# 56-unit mesh needs.
+#
+# The width is odd on purpose. A stand's lead-in line has to fall on a taxiway
+# centreline, and centrelines run down the middle of a cell — so the lead-in axis
+# has to be a cell centre too. An even span puts it on the grid line between two
+# cells and needs a half-tile shift to correct, which then slides the 56-wide
+# mesh 16 units off centre in a 64-wide footprint and leaves it overhanging the
+# neighbouring tile by 12. Against a pier root that neighbour is the terminal
+# hall, and the two visibly interpenetrated.
+#
+# Three cells puts the axis on the middle cell's centre with no shift at all, and
+# leaves 20 units of margin on either side of the mesh. The overhang cannot
+# happen, rather than being steered away from.
+#
+# It also means `rot` now moves the footprint, where a square one only turned the
+# jet bridge. Same rule as the hall and the pier: a stand at the same rot as its
+# pier lies correctly alongside it.
+const STAND_SIZE := Vector2i(2, 3)
 
 
 func stand_cells_for(anchor: Vector2i, rot: int = 0) -> Array:
@@ -629,13 +650,58 @@ func stand_is_connected(g: Dictionary) -> bool:
 	return stand_park_cell(g) != NOWHERE
 
 
-# Planes park on whichever of the stand's tiles touches a taxiway.
+# Planes park on whichever of the stand's tiles touches a taxiway — and where
+# more than one does, on the tile the lead-in line runs through.
+#
+# That second half started mattering when stands went three cells across. The
+# renderer branches the taxiway into the stand at the lead-in cell and nowhere
+# else (Render3D._on_stand_leadin), so taking the first touching tile instead
+# routed the aircraft in one cell to the side of its own painted turn-off — it
+# drove in over the shoulder while the yellow line sat empty beside it.
 func stand_park_cell(g: Dictionary) -> Vector2i:
-	for c in g["cells"]:
+	var cells: Array = g["cells"]
+	# The pier-derived heading only, NOT stand_park_heading — that one falls back
+	# to asking this function, and the two would call each other forever.
+	var pier := _stand_pier_heading(g)
+	var axis := Vector2.ZERO
+	if not is_nan(pier):
+		axis = Vector2(-sin(pier), cos(pier))
+	var centre := _cells_centre(cells)
+
+	var best := NOWHERE
+	var best_off := INF
+	for c in cells:
+		var touches := false
 		for n in neighbors(c):
 			if tile_type(n) == TileType.TAXIWAY:
-				return c
-	return NOWHERE
+				touches = true
+				break
+		if not touches:
+			continue
+		# A remote stand has no lead-in axis to be off, so the first tile wins.
+		var off := 0.0
+		if axis != Vector2.ZERO:
+			off = absf((cell_to_world(c) - centre).dot(axis))
+		if off < best_off:
+			best_off = off
+			best = c
+	return best
+
+
+func _cells_centre(cells: Array) -> Vector2:
+	var sum := Vector2.ZERO
+	for c in cells:
+		sum += cell_to_world(c)
+	return sum / float(cells.size())
+
+
+# The half of stand_park_heading that a pier alone answers.
+func _stand_pier_heading(g: Dictionary) -> float:
+	for c in g["cells"]:
+		for n in neighbors(c):
+			if tile_type(n) == TileType.CONCOURSE:
+				return Vector2(n - c).angle()
+	return NAN
 
 
 # Where a parked aircraft actually sits. The park *cell* is only where the taxi
@@ -643,33 +709,44 @@ func stand_park_cell(g: Dictionary) -> Vector2i:
 # widebody parked on one tile with the other visibly empty beside it.
 func stand_park_point(g: Dictionary) -> Vector2:
 	var cells: Array = g["cells"]
-	var sum := Vector2.ZERO
-	for c in cells:
-		sum += cell_to_world(c)
-	var centre: Vector2 = sum / float(cells.size())
-	# A 2x2 stand's own axis falls on a GRID LINE, halfway between two cells,
-	# while every taxiway piece draws its centreline down the middle of a CELL.
-	# Left alone, the stand's yellow lead-in line and the taxiway it is supposed
-	# to join are permanently half a tile apart and can never meet.
-	#
-	# So the axis is shifted half a tile sideways onto a cell centre. The
-	# aircraft parks on that line and the mesh is laid along it, which is why
-	# this lives here rather than in the renderer — the parked aircraft and the
-	# painted line have to agree.
+	var centre := _cells_centre(cells)
+	# The aircraft parks on the lead-in axis and the mesh is laid along it, which
+	# is why this lives here rather than in the renderer: the parked aircraft and
+	# the painted line have to agree about where that axis is.
 	var h := stand_park_heading(g)
 	if is_nan(h):
 		return centre
 	var fwd := Vector2(cos(h), sin(h))
 	var perp := Vector2(-fwd.y, fwd.x)
-	# Either sign lands on a cell centre, so the choice is free — and it matters,
-	# because the stand mesh is wider than the half-footprint once shifted and
-	# overhangs whatever is on that side. At a pier root that neighbour is the
-	# terminal hall, and the two visibly interpenetrated. Shift AWAY from a
-	# building if one side has one.
+	# Three cells across, so the axis is already the middle cell's centre — the
+	# same place a taxiway piece draws its centreline. Nothing to correct.
+	if _stand_lateral_cells(cells, perp) % 2 == 1:
+		return centre
+	# An even span puts it on the grid line between two cells instead, half a tile
+	# off every centreline it is meant to meet. Two things still produce one: a
+	# stand turned across its own pier, and any stand in a save written while they
+	# were 2x2, since cells are serialized rather than rederived from STAND_SIZE.
+	# Neither deserves a permanently unreachable stand, so shift it onto a cell
+	# centre — accepting the mesh overhang that the odd width exists to avoid.
+	# Either sign lands on one; take the side away from any building, since the
+	# mesh overhangs its footprint once shifted.
 	var sign := -1.0
 	if _stand_side_blocked(g, -perp) and not _stand_side_blocked(g, perp):
 		sign = 1.0
 	return centre + perp * (sign * TILE * 0.5)
+
+
+# How many cells the stand spans across its lead-in axis — the span that has to
+# be odd for the axis to land on a cell centre.
+func _stand_lateral_cells(cells: Array, perp: Vector2) -> int:
+	var across := absf(perp.x) > absf(perp.y)
+	var lo := 1 << 30
+	var hi := -(1 << 30)
+	for c in cells:
+		var v: int = c.x if across else c.y
+		lo = mini(lo, v)
+		hi = maxi(hi, v)
+	return hi - lo + 1
 
 
 # Is there a building immediately beyond the stand on this side? Checked one
@@ -695,10 +772,9 @@ func _stand_side_blocked(g: Dictionary, dir: Vector2) -> bool:
 # Returns NAN when the stand answers neither question; the caller then leaves the
 # aircraft's heading alone rather than snapping it to an arbitrary axis.
 func stand_park_heading(g: Dictionary) -> float:
-	for c in g["cells"]:
-		for n in neighbors(c):
-			if tile_type(n) == TileType.CONCOURSE:
-				return Vector2(n - c).angle()
+	var pier := _stand_pier_heading(g)
+	if not is_nan(pier):
+		return pier
 	var park := stand_park_cell(g)
 	if park != NOWHERE:
 		for n in neighbors(park):
@@ -1087,34 +1163,39 @@ func from_dict(d: Dictionary) -> void:
 # --- starting layout ---
 
 func seed_starter_airport() -> void:
-	place_runway_seg(cell_to_world(Vector2i(4, 12)), cell_to_world(Vector2i(19, 12)))
+	# The whole movement area sits two rows further south than it used to. A pier
+	# is six cells now and a stand three, and the old stack ran the apron straight
+	# through where the pier's last two cells go. Everything below the buildings
+	# moved together, so the loop the layout was tuned around is unchanged in
+	# shape — only its offset.
+	place_runway_seg(cell_to_world(Vector2i(4, 14)), cell_to_world(Vector2i(19, 14)))
 	# A parallel taxiway plus an apron loop, so a blocked plane has a detour to
 	# find. A single-width spine deadlocks head-on traffic almost immediately.
 	for x in range(4, 22):
-		place_taxiway(Vector2i(x, 10))
+		place_taxiway(Vector2i(x, 12))
 	# Apron, parallel taxiway and the two links between them — the same loop the
 	# pre-pier layout used, and the reason it never deadlocked. Every stand below
 	# opens straight onto the apron row, so no aircraft ever enters a cul-de-sac.
 	# Hanging stands off single-width service lanes instead cost 6-7 gridlocks a
 	# run; widening those lanes fixed it but read as a double-width taxiway.
 	for x in range(8, 21):
-		place_taxiway(Vector2i(x, 7))
-	place_taxiway(Vector2i(4, 11))
-	place_taxiway(Vector2i(19, 11))
+		place_taxiway(Vector2i(x, 9))
+	place_taxiway(Vector2i(4, 13))
+	place_taxiway(Vector2i(19, 13))
 	# Links between the apron and the parallel taxiway. Three, not two: with only
 	# the ends joined, a departure pushing back met an arrival head-on and the
 	# nearest detour was the full length of the apron, which is what "gridlocked
 	# outbound" was. A middle link gives blocked traffic somewhere to go without
 	# widening anything.
-	for y in [8, 9]:
+	for y in [10, 11]:
 		for x in [8, 13, 20]:
 			place_taxiway(Vector2i(x, y))
 
 	# The landside spine, north to south: road in from the map edge, car parks
-	# beside it, the hall across the top, then TWO piers hanging off it at right
-	# angles — which is the 1-to-N relationship the building model exists for —
-	# with a stand in the gap between them and one outboard of each. Every stand
-	# touches a pier and nothing touches the hall.
+	# beside it, the hall across the top, then a pier hanging off it at right
+	# angles — the 1-to-N relationship the building model exists for — with a
+	# stand on each flank. Every stand touches the pier and nothing touches the
+	# hall.
 	place_road(Vector2i(13, 0))
 	place_parking(Vector2i(12, 0))
 	place_parking(Vector2i(14, 0))
@@ -1126,17 +1207,31 @@ func seed_starter_airport() -> void:
 	# the other, which is what a nose-in stand requires — an aircraft parked
 	# facing the pier reverses straight back, and there has to be something to
 	# reverse onto. Stands backing onto grass was the visible symptom.
+	#
 	# One stand per flank, each with its own single-cell lane straight out to the
 	# apron. What made the lanes two cells wide before was two stands sharing
 	# one: that is a cul-de-sac, and two aircraft wanting stands off it have
 	# nowhere to pass — 6 gridlocks a run, measured twice. A lane serving a
-	# single stand has no such contention, so the pavement behind the stands
-	# drops from sixteen cells to four.
+	# single stand has no such contention.
 	#
-	# The starter therefore opens with two stands rather than four. The player
-	# can add more, but doing so means adding the passing room to go with them.
-	for y in [5, 6]:
+	# The stands take the pier's SOUTHERN half, nearest the apron, and the lane
+	# beside each is two cells: the stand's lead-in cell, and one more to reach
+	# the apron. That is exactly the depth the old two-cell stand had, and it is
+	# the number that matters — an aircraft pushing back crosses two cells of
+	# single-width lane before it has somewhere to pass.
+	#
+	# Running the lane the full three cells of the stand's width instead cost 5
+	# gridlocks and 2 tows a run, measured: it is a cul-de-sac, and making it
+	# deeper widens the window in which a departure meets its own replacement
+	# head-on. The stand's other two cells simply front onto grass and apron,
+	# which is what a real stand does.
+	#
+	# The pier's northern half is left empty on purpose. There is room for a
+	# second stand on each flank, but taking it means adding the passing room to
+	# go with it — a decision for the player rather than a trap the opening
+	# layout walks them into.
+	for y in [7, 8]:
 		place_taxiway(Vector2i(9, y))
 		place_taxiway(Vector2i(15, y))
-	for anchor in [Vector2i(10, 5), Vector2i(13, 5)]:
+	for anchor in [Vector2i(10, 6), Vector2i(13, 6)]:
 		place_stand(stand_cells_for(anchor, 0), 0)

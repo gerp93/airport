@@ -157,8 +157,19 @@ const START_FACILITIES := {"tower": 1, "crew": 1, "fuel": 1, "mech": 0}
 const COST_TERMINAL := 54_000_000
 const UPKEEP_TERMINAL := 18_000
 const TERM_UNITS_PER_TILE := 1
-const COST_CONCOURSE := 18_000_000
-const UPKEEP_CONCOURSE := 6_000
+# Priced and charged PER TILE of pier, derived from the size rather than written
+# out, so lengthening a pier cannot quietly make it cheaper per tile. It went from
+# four tiles to six when stands widened to three cells, and holding the per-tile
+# figure is what keeps that a change in what a pier is rather than a discount on
+# one.
+#
+# Worth watching in a play session: $27M against $28M of starting cash makes this
+# the tightest single purchase in the game, and "the opening budget may be too
+# tight" was already an open balance question at $18M.
+const COST_CONCOURSE_TILE := 4_500_000
+const COST_CONCOURSE := COST_CONCOURSE_TILE * AirportGrid.CONCOURSE_SIZE.y
+const UPKEEP_CONCOURSE_TILE := 1_500
+const UPKEEP_CONCOURSE := UPKEEP_CONCOURSE_TILE * AirportGrid.CONCOURSE_SIZE.y
 # Landside: passengers arrive by road and have to leave their cars somewhere.
 # Raw land, priced per tile so a bigger parcel costs more. Cheap against what
 # gets built on it — the stand is that a tract is a lump sum you commit up front,
@@ -3220,9 +3231,13 @@ func _update_ops_ui() -> void:
 	day_label.text = "Day %d · %ds to close%s" % [day, left, wx_txt]
 	day_label.modulate = Color(1.0, 0.72, 0.35) if not weather.is_empty() else Color.WHITE
 
-	var stranded := grid.count_tiles(AirportGrid.TileType.CONCOURSE, false) \
-		- grid.count_tiles(AirportGrid.TileType.CONCOURSE, true)
-	var road_note := "" if stranded == 0 else "  !! %d concourse unroaded" % stranded
+	# The HALL is what a road has to reach: it processes the passengers and it is
+	# the only building passenger capacity is derived from. Piers are airside and
+	# never touch a road by design, so counting those — which this did, from back
+	# when a concourse tile WAS the hall — left the warning lit permanently on a
+	# perfectly well-connected airport.
+	var stranded := grid.terminal_tile_count(false) - grid.terminal_tile_count(true)
+	var road_note := "" if stranded == 0 else "  !! %d terminal unroaded" % stranded
 	capacity_label.text = "Airborne %d/%d · Crew %d/%d · Fuel %d/%d\nPax %d/%d · Checks %d/%d\nUpkeep %s/day%s\nLast day: %s in, %s out" % [
 		airborne_count(), effective_air_capacity(),
 		used["crew"], capacity("crew"),

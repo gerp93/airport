@@ -45,6 +45,13 @@ Effort: **S** small, **M** moderate, **L** large. ⚠️ = changes game balance.
       tiers (session-static scenery, ownership-gated ground, layout) and per-tile
       geometry batched into `MultiMesh`. Measured on the heaviest terrain:
       6.5ms -> 0.34ms per placement, 9246 -> 294 nodes.
+- [x] **Weld the authored models.** The taxiway kit, buildings, stand and tower
+      arrived after the above and undid most of it — a `.glb` is 35-144 mesh
+      nodes, and one was instantiated per placed object: 1740 nodes and 14ms per
+      rebuild. Each model is now welded once into a single `ArrayMesh` and
+      batched: **62 nodes, 2.2ms**, and a painted tile costs a `Transform3D`
+      instead of a subtree. Not back to 0.34ms — that figure predates the models
+      existing — but it no longer grows with the airport.
 - [x] Multiple save slots. Done: three slots with a picker, F5/F9 quick
       save/load against the last-used slot.
 
@@ -77,10 +84,12 @@ never borrows.
 
 - [ ] Land holding cost ⚠️. Buying tracts is pure upside once affordable; a small
       per-tile upkeep makes *when* you expand a decision. **S**
-- [ ] Fix the starter layout's road ⚠️. Only one of three concourse tiles touches
-      the access road, so two-thirds of the building handles nobody. Fixing it
-      roughly triples starting passenger capacity — a real balance change, which
-      is why it is here and not in Phase 0. **S**
+- [ ] Judge the pier price ⚠️. `COST_CONCOURSE` is now derived per tile from
+      `CONCOURSE_SIZE`, so lengthening a pier from four tiles to six took it from
+      $18M to $27M against $28M of starting cash — the tightest single purchase
+      in the game, on top of "opening budget may be too tight" already being open
+      below. Holding the per-tile figure was the honest default; whether it plays
+      is a play session. **S**
 - [ ] Fuel price fluctuation ⚠️. Recurring pressure on margins. **S**
 - [ ] Difficulty settings ⚠️. Starting cash and demand multipliers. Also the
       cheapest way to explore the balance questions below. **S**

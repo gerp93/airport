@@ -40,15 +40,17 @@ const MODEL_LENGTHS := {"R": 30.0, "N": 40.0, "W": 66.0}
 const TOWER_MODEL := preload("res://assets/models/control-tower.glb")
 const TOWER_SCALE := 1.6
 
-# Authored to the tile grid: the hall is 6x2 tiles, the pier 1x4, the stand 2x2.
-# Those are AirportGrid's TERMINAL_SIZE / CONCOURSE_SIZE / STAND_SIZE, so a
-# building is exactly one model and none of them need merging or stretching.
+# Authored to the tile grid: the hall is 6x2 tiles and the stand's 56x62 mesh sits
+# inside a 3x2 footprint. Those are AirportGrid's TERMINAL_SIZE and STAND_SIZE, so
+# neither needs merging or stretching.
 #
-# The pier is the one exception: it is scaled along its run so a 4-tile pier
-# fills 4 tiles exactly, since the mesh is authored a shade under.
+# The pier is the exception, and the only building whose size is a design figure
+# rather than the mesh's: it is stretched along its run to whatever CONCOURSE_SIZE
+# says, out of a mesh authored 30 wide by 120.5 long.
 const TERMINAL_MODEL := preload("res://assets/models/terminal.glb")
 const CONCOURSE_MODEL := preload("res://assets/models/concourse.glb")
 const CONCOURSE_MODEL_LEN := 120.5
+const CONCOURSE_MODEL_W := 30.0
 const STAND_MODEL := preload("res://assets/models/stand.glb")
 
 # --- projection -------------------------------------------------------------
@@ -329,6 +331,106 @@ func _flush_batches(root: Node3D) -> void:
 	_batches.clear()
 
 
+# --- authored models -------------------------------------------------------
+#
+# The .glb models are not one mesh each: the taxiway pieces carry 35 to 82
+# MeshInstance3D children, the stand 68, the tower 144. Instantiating one scene
+# per placed object is what took the layout rebuild from 294 nodes and 0.34ms to
+# 1740 nodes and 14ms — a cost paid on every single tile placement, because
+# mark_layout_dirty() rebuilds the lot.
+#
+# So each model is welded ONCE into a single ArrayMesh, one surface per material,
+# and every placement of it becomes an instance transform in a MultiMesh. A
+# painted taxiway tile then costs a Transform3D rather than a subtree, and the
+# whole taxiway system is five nodes however much pavement there is.
+#
+# `pre` is a transform baked into the weld — used for the taxiway kit, whose
+# pieces need scaling to the tile and backing up by half their own length. It is
+# part of the cache key's meaning, so a model welded with two different `pre`
+# values needs two different keys.
+#
+# Anything varying per placement goes in the INSTANCE transform instead, which is
+# how a pier stretches to its own length off a shared mesh.
+#
+# These survive set_terrain(), unlike the _mats cache it clears: model materials
+# come out of the .glb and are never rebuilt against the terrain palette.
+var _welded := {}
+var _model_xforms := {}
+
+
+func _add_model(key: String, scene: PackedScene, pre: Transform3D, xf: Transform3D) -> void:
+	if not _model_xforms.has(key):
+		_model_xforms[key] = {"scene": scene, "pre": pre, "x": []}
+	(_model_xforms[key]["x"] as Array).append(xf)
+
+
+func _welded_mesh(key: String, scene: PackedScene, pre: Transform3D) -> ArrayMesh:
+	if _welded.has(key):
+		return _welded[key]
+	var src: Node3D = scene.instantiate()
+	var by_mat := {}
+	# Materials are dictionary keys, so surface order would otherwise be whatever
+	# the hash happens to give. Kept explicit, so a rebuild cannot reorder a
+	# model's markings under its own pavement.
+	var order: Array = []
+	_weld(src, pre, by_mat, order)
+
+	var out := ArrayMesh.new()
+	for mat in order:
+		(by_mat[mat] as SurfaceTool).commit(out)
+		out.surface_set_material(out.get_surface_count() - 1, mat)
+	# Never entered the tree, so free() rather than queue_free().
+	src.free()
+	_welded[key] = out
+	return out
+
+
+func _weld(n: Node, xf: Transform3D, by_mat: Dictionary, order: Array) -> void:
+	var here := xf
+	if n is Node3D:
+		here = xf * (n as Node3D).transform
+	if n is MeshInstance3D:
+		var mi: MeshInstance3D = n
+		var m: Mesh = mi.mesh
+		if m != null:
+			for s in m.get_surface_count():
+				var mat: Material = mi.get_active_material(s)
+				if not by_mat.has(mat):
+					var st := SurfaceTool.new()
+					st.begin(Mesh.PRIMITIVE_TRIANGLES)
+					by_mat[mat] = st
+					order.append(mat)
+				(by_mat[mat] as SurfaceTool).append_from(m, s, here)
+	for c in n.get_children():
+		_weld(c, here, by_mat, order)
+
+
+# No material_override, unlike _flush_batches: a welded mesh carries a surface per
+# material of its own, which is what lets one MultiMesh stand in for a model that
+# was eighty separate meshes.
+func _flush_models(root: Node3D) -> void:
+	for key in _model_xforms:
+		var b: Dictionary = _model_xforms[key]
+		var xforms: Array = b["x"]
+		if xforms.is_empty():
+			continue
+		var mm := MultiMesh.new()
+		# Format before instance_count — changing it afterwards wipes the buffer.
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = _welded_mesh(key, b["scene"], b["pre"])
+		mm.instance_count = xforms.size()
+		for i in xforms.size():
+			mm.set_instance_transform(i, xforms[i])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		var g: Rect2 = grid.grid_rect()
+		mmi.custom_aabb = AABB(
+			Vector3(g.position.x - 2000.0, -400.0, g.position.y - 2000.0),
+			Vector3(g.size.x + 4000.0, 900.0, g.size.y + 4000.0))
+		root.add_child(mmi)
+	_model_xforms.clear()
+
+
 func _build_environment() -> void:
 	var env := Environment.new()
 	env.background_mode = Environment.BG_COLOR
@@ -527,12 +629,18 @@ func _rebuild_layout() -> void:
 
 	_build_tiles()
 	_flush_batches(_tiles_root)
+	_flush_models(_tiles_root)
 	_build_terminals()
 	_flush_batches(_terminal_root)
+	_flush_models(_terminal_root)
 	_build_runways()
 	_flush_batches(_runway_root)
+	# The stand PADS stay individual nodes — sync_stands() recolours them every
+	# frame, and batching would force per-instance colour. Only the model batches.
 	_build_stands()
+	_flush_models(_stand_root)
 	_build_tower()
+	_flush_models(_tower_root)
 
 
 # Terrain is cosmetic and arrives only once the player picks a region, which is
@@ -784,6 +892,12 @@ const TX_MODEL_TILE := 44.0
 # turned into a scribble of doubled markings. Whatever the pavement ends up
 # looking like, it cannot be bought by letting the pieces overrun each other.
 const TX_SCALE := AirportGrid.TILE / TX_MODEL_TILE
+# Baked into the weld rather than applied per tile: scaled to the tile, and backed
+# up by half its own length — not half a tile — because the piece hangs south from
+# its origin and has to end up centred on its cell once rotated.
+const TX_PRE := Transform3D(
+	Basis(Vector3(TX_SCALE, 0.0, 0.0), Vector3(0.0, TX_SCALE, 0.0), Vector3(0.0, 0.0, TX_SCALE)),
+	Vector3(0.0, 0.0, -TX_MODEL_TILE * TX_SCALE * 0.5))
 
 
 # One yaw step is +90 degrees about Y, which carries model north to model west.
@@ -845,20 +959,15 @@ func _build_taxiway_tile(cell: Vector2i, centre: Vector2) -> void:
 		# An isolated stub matches nothing; a lone `end` still reads correctly.
 		chosen = "end"
 
-	var s := TX_SCALE
-	var holder := Node3D.new()
+	# One transform, not a subtree. The mesh itself is welded once by _tx_mesh()
+	# and already carries the scale and the half-length offset, so all a tile
+	# contributes is where its piece stands and which way it faces.
+	#
 	# Lifted onto the pavement band. The kit lays its pavement flat at y=0, real
 	# aerodrome fashion, which put it exactly coplanar with the ground and lost
 	# every z-fight — the taxiways instantiated correctly and drew nothing at all.
-	holder.position = w3(centre, H_PAVEMENT)
-	holder.rotation.y = float(steps) * PI * 0.5
-	var m3: Node3D = (TX_MODELS[chosen] as PackedScene).instantiate()
-	m3.scale = Vector3.ONE * s
-	# The piece hangs south from its origin, so back it up by half its own length
-	# — not half a tile — to sit centred on the cell once rotated.
-	m3.position = Vector3(0.0, 0.0, -TX_MODEL_TILE * s * 0.5)
-	holder.add_child(m3)
-	_tiles_root.add_child(holder)
+	_add_model("tx:" + chosen, TX_MODELS[chosen], TX_PRE,
+		Transform3D(Basis(Vector3.UP, float(steps) * PI * 0.5), w3(centre, H_PAVEMENT)))
 
 
 # A road is a narrow ribbon rather than a full tile of tarmac, so landside stops
@@ -904,17 +1013,15 @@ func _build_road_tile(cell: Vector2i, centre: Vector2) -> void:
 # own footprints.
 func _build_terminals() -> void:
 	for t in grid.terminals:
-		_place_building(TERMINAL_MODEL, t["cells"], _building_yaw(t["cells"]))
+		_place_building("terminal", TERMINAL_MODEL, t["cells"], _building_yaw(t["cells"]))
 	for c in grid.concourses:
 		_place_pier(c)
 
 
 # Centred on the footprint's middle, turned to run along its long axis.
-func _place_building(model: PackedScene, cells: Array, yaw: float) -> void:
-	var n: Node3D = model.instantiate()
-	n.position = w3(_cells_centre(cells))
-	n.rotation.y = yaw
-	_terminal_root.add_child(n)
+func _place_building(key: String, model: PackedScene, cells: Array, yaw: float) -> void:
+	_add_model(key, model, Transform3D.IDENTITY,
+		Transform3D(Basis(Vector3.UP, yaw), w3(_cells_centre(cells))))
 
 
 # A pier is directional: the mesh's origin is its link, at the end that meets the
@@ -929,12 +1036,25 @@ func _place_pier(c: Dictionary) -> void:
 	# Start at the root cell's OUTER edge, not its centre, or the pier would sit
 	# half a tile short of the hall it is supposed to be joined to.
 	var root: Vector2 = grid.cell_to_world(cells[0]) - dir * (t * 0.5)
-	var n: Node3D = CONCOURSE_MODEL.instantiate()
-	n.position = w3(root)
+	# Stretched along the run ONLY. Scaling uniformly happened to work while a
+	# pier was four tiles — 128/120.5 is 1.06, and 30 units of width times 1.06 is
+	# a hair under the tile it has to fit in — but it was luck, not design: at six
+	# tiles the same uniform factor is 1.59, and the pier comes out 1.6 tiles wide,
+	# straddling the stands on both flanks.
+	#
+	# So width and height are pinned to the tile and only depth follows the length.
+	#
+	# That length varies per pier, so it goes in the INSTANCE transform: every pier
+	# on the field shares one welded mesh and stretches it to its own run.
+	var size := Vector3(
+		AirportGrid.TILE / CONCOURSE_MODEL_W,
+		AirportGrid.TILE / CONCOURSE_MODEL_W,
+		(float(cells.size()) * t) / CONCOURSE_MODEL_LEN)
 	# The mesh's +z maps to the run direction, so local (0,0,1) must land on dir.
-	n.rotation.y = atan2(dir.x, dir.y)
-	n.scale = Vector3.ONE * ((float(cells.size()) * t) / CONCOURSE_MODEL_LEN)
-	_terminal_root.add_child(n)
+	# Rotation THEN scale, matching what Node3D composes from rotation and scale —
+	# Basis.scaled() post-multiplies and would skew every pier not laid east-west.
+	_add_model("concourse", CONCOURSE_MODEL, Transform3D.IDENTITY, Transform3D(
+		Basis(Vector3.UP, atan2(dir.x, dir.y)) * Basis.from_scale(size), w3(root)))
 
 
 func _cells_centre(cells: Array) -> Vector2:
@@ -1030,10 +1150,8 @@ func _build_tower() -> void:
 	var cell := _tower_site()
 	if cell == AirportGrid.NOWHERE:
 		return
-	var model: Node3D = TOWER_MODEL.instantiate()
-	model.scale = Vector3.ONE * TOWER_SCALE
-	model.position = w3(grid.cell_to_world(cell))
-	_tower_root.add_child(model)
+	_add_model("tower", TOWER_MODEL, Transform3D.IDENTITY, Transform3D(
+		Basis.from_scale(Vector3.ONE * TOWER_SCALE), w3(grid.cell_to_world(cell))))
 
 
 # The nearest empty tile to the middle of the movement area that the tower can
@@ -1053,11 +1171,20 @@ func _tower_site() -> Vector2i:
 			var c := Vector2i(x, y)
 			if not grid.is_buildable(c) or grid.tile_type(c) != AirportGrid.TileType.EMPTY:
 				continue
-			# Distance is only the tie-break within a tier, so the tier weight has
-			# to exceed any distance the field can produce — the grid's diagonal
-			# is about 51 cells.
-			var score: float = float(_tower_penalty(c)) * 1000.0 \
-				+ Vector2(c - focus).length()
+			# Two different kinds of penalty, deliberately weighted apart.
+			#
+			# A building next door is disqualifying, so its weight exceeds any
+			# distance the field can produce — the grid's diagonal is about 51
+			# cells — and distance only breaks ties within that tier.
+			#
+			# Pavement next door is merely unwanted: the tower's base is 41 units
+			# across against a 32-unit tile, so it overhangs, and against a taxiway
+			# that reads as a tower standing in the traffic. But it is worth a few
+			# cells of walk, not a trip to the far corner — a flat 6.0 nudge tried
+			# once before pushed the tower clean across the runway. Counting SIDES
+			# at a small weight caps the whole thing at four cells' distance, which
+			# cannot outrun the field.
+			var score: float = _tower_clearance_cost(c) + Vector2(c - focus).length()
 			if score < best_score:
 				best_score = score
 				best = c
@@ -1069,15 +1196,27 @@ func _tower_site() -> Vector2i:
 # it would foul a stand. Taxiways and runways are explicitly not on that list —
 # standing over them is the entire job, and an infield site between the apron and
 # the parallel taxiway is where a real tower goes.
-func _tower_penalty(c: Vector2i) -> int:
+func _tower_clearance_cost(c: Vector2i) -> float:
+	var building := false
+	var pavement := 0
 	for n in grid.neighbors(c):
 		# Annotated, not inferred: `grid` is untyped, so this returns Variant and
 		# `:=` fails the "inferred from Variant" check.
 		var t: int = grid.tile_type(n)
-		if t == AirportGrid.TileType.CONCOURSE or t == AirportGrid.TileType.STAND \
+		# TERMINAL is on this list because it is the case the rule was written for.
+		# It was missing: when the old TERMINAL tile was renamed CONCOURSE and a new
+		# hall type appended, this kept naming the pier and quietly stopped naming
+		# the hall — so the one building the tower must not hug was the one it was
+		# free to stand against.
+		if t == AirportGrid.TileType.TERMINAL or t == AirportGrid.TileType.CONCOURSE \
+				or t == AirportGrid.TileType.STAND \
 				or t == AirportGrid.TileType.ROAD or t == AirportGrid.TileType.PARKING:
-			return 1
-	return 0
+			building = true
+		elif t == AirportGrid.TileType.TAXIWAY or t == AirportGrid.TileType.RUNWAY:
+			pavement += 1
+	# One walk of the neighbours, not two: this runs for every owned cell on every
+	# layout rebuild, and splitting it cost most of a millisecond.
+	return (1000.0 if building else 0.0) + float(pavement) * 2.0
 
 
 # Controllers need sightlines over the movement area, so the tower is drawn to
@@ -1132,15 +1271,16 @@ func _build_stands() -> void:
 		var h: float = grid.stand_park_heading(g)
 		if not is_nan(h):
 			to_pier = Vector2(cos(h), sin(h))
-		var n: Node3D = STAND_MODEL.instantiate()
-		# Laid along stand_park_point's axis, not the footprint's, so the painted
-		# lead-in lands on a cell centre and meets the taxiway centreline. Half
-		# the 2x2 footprint is exactly one tile, so this is its near edge.
-		n.position = w3(grid.stand_park_point(g) + to_pier * t, H_STAND)
+		# Laid along stand_park_point's axis, so the painted lead-in lands on a
+		# cell centre and meets the taxiway centreline. The stand is two cells
+		# DEEP whichever way it is turned, so half of that is one tile — this is
+		# the footprint's near edge, against the pier.
+		#
 		# Local +z must run from that edge back across the stand, away from the
 		# pier — the direction the bridge extends to reach the aircraft.
-		n.rotation.y = atan2(-to_pier.x, -to_pier.y)
-		_stand_root.add_child(n)
+		_add_model("stand", STAND_MODEL, Transform3D.IDENTITY, Transform3D(
+			Basis(Vector3.UP, atan2(-to_pier.x, -to_pier.y)),
+			w3(grid.stand_park_point(g) + to_pier * t, H_STAND)))
 
 
 # Stand occupancy flips constantly while the layout does not, so colour is
