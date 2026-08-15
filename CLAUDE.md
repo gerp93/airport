@@ -78,6 +78,26 @@ tower 144 — so instancing one scene per object took the rebuild to 1740 nodes 
 per material, and `_flush_models()` emits one `MultiMesh` per model. 62 nodes and
 2.2ms, and a painted tile now costs a `Transform3D` rather than a subtree.
 
+`_add_model()` also takes a `remap` — which repaints or drops individual meshes as
+they are welded — and a `shadows` flag. Both are inputs to the weld, so **anything
+they depend on must also vary the cache key**; the remap only runs on a miss.
+
+Two things they exist for, both about the taxiway kit:
+
+- **The kit's corner shoulders are repainted as pavement when the diagonal tile
+  is pavement too.** Each junction piece fills the outside of its turn fillet
+  with dark asphalt, which is right standing in grass and wrong in the middle of
+  an apron. They are *repainted*, never dropped: the fillet sharing that corner
+  box is only a quarter-disc, so removing the shoulder leaves a crescent of bare
+  ground. Corners are identified by **geometry, not name** — the kit's names are
+  in its own frame and do not survive the mapping (`corner` opens north and west,
+  and `cross`'s "shoulder_sw" sits at its north-west).
+- **The kit casts no shadow.** Its pavement, shoulders and fillets are separate
+  slabs at slightly different heights, so under a low sun every fillet's curved
+  edge threw a quarter-circle of shade across the slab beside it — four per cell
+  across an apron. Flat ground has no business casting a shadow; the buildings
+  and tower still do.
+
 Anything that varies per placement goes in the **instance** transform, not the
 weld — that is how every pier stretches to its own length off one shared mesh.
 The weld's `pre` argument is for what is genuinely constant (the taxiway kit's

@@ -358,22 +358,49 @@ var _welded := {}
 var _model_xforms := {}
 
 
-func _add_model(key: String, scene: PackedScene, pre: Transform3D, xf: Transform3D) -> void:
+# `remap` optionally repaints or drops individual meshes as they are welded. It
+# takes (node name, material name, bounds in the welded frame) and returns the
+# material name to use, or "" to drop the mesh. It only runs on a cache miss, so
+# whatever varies it MUST also vary the key.
+func _add_model(key: String, scene: PackedScene, pre: Transform3D, xf: Transform3D,
+		remap := Callable(), shadows := true) -> void:
 	if not _model_xforms.has(key):
-		_model_xforms[key] = {"scene": scene, "pre": pre, "x": []}
+		_model_xforms[key] = {
+			"scene": scene, "pre": pre, "remap": remap, "shadows": shadows, "x": [],
+		}
 	(_model_xforms[key]["x"] as Array).append(xf)
 
 
-func _welded_mesh(key: String, scene: PackedScene, pre: Transform3D) -> ArrayMesh:
+func _welded_mesh(key: String, scene: PackedScene, pre: Transform3D,
+		remap := Callable()) -> ArrayMesh:
 	if _welded.has(key):
 		return _welded[key]
 	var src: Node3D = scene.instantiate()
+	# Collected first, grouped second: a remap can send a mesh to a material that
+	# has not been walked yet, and resolving names against a half-filled table
+	# would silently depend on the order the .glb happens to list its nodes in.
+	var parts: Array = []
+	var by_name := {}
+	_collect_parts(src, pre, parts, by_name)
+
 	var by_mat := {}
 	# Materials are dictionary keys, so surface order would otherwise be whatever
 	# the hash happens to give. Kept explicit, so a rebuild cannot reorder a
 	# model's markings under its own pavement.
 	var order: Array = []
-	_weld(src, pre, by_mat, order)
+	for p in parts:
+		var mat: Material = p["mat"]
+		if remap.is_valid():
+			var want: String = remap.call(p["node"], p["name"], p["box"])
+			if want == "":
+				continue
+			mat = by_name.get(want, mat)
+		if not by_mat.has(mat):
+			var st := SurfaceTool.new()
+			st.begin(Mesh.PRIMITIVE_TRIANGLES)
+			by_mat[mat] = st
+			order.append(mat)
+		(by_mat[mat] as SurfaceTool).append_from(p["mesh"], p["surface"], p["xf"])
 
 	var out := ArrayMesh.new()
 	for mat in order:
@@ -385,7 +412,7 @@ func _welded_mesh(key: String, scene: PackedScene, pre: Transform3D) -> ArrayMes
 	return out
 
 
-func _weld(n: Node, xf: Transform3D, by_mat: Dictionary, order: Array) -> void:
+func _collect_parts(n: Node, xf: Transform3D, parts: Array, by_name: Dictionary) -> void:
 	var here := xf
 	if n is Node3D:
 		here = xf * (n as Node3D).transform
@@ -395,14 +422,16 @@ func _weld(n: Node, xf: Transform3D, by_mat: Dictionary, order: Array) -> void:
 		if m != null:
 			for s in m.get_surface_count():
 				var mat: Material = mi.get_active_material(s)
-				if not by_mat.has(mat):
-					var st := SurfaceTool.new()
-					st.begin(Mesh.PRIMITIVE_TRIANGLES)
-					by_mat[mat] = st
-					order.append(mat)
-				(by_mat[mat] as SurfaceTool).append_from(m, s, here)
+				var nm := "" if mat == null else mat.resource_name
+				if nm != "" and not by_name.has(nm):
+					by_name[nm] = mat
+				parts.append({
+					"node": String(mi.name), "name": nm, "mat": mat,
+					"mesh": m, "surface": s, "xf": here,
+					"box": here * mi.get_aabb(),
+				})
 	for c in n.get_children():
-		_weld(c, here, by_mat, order)
+		_collect_parts(c, here, parts, by_name)
 
 
 # No material_override, unlike _flush_batches: a welded mesh carries a surface per
@@ -417,12 +446,14 @@ func _flush_models(root: Node3D) -> void:
 		var mm := MultiMesh.new()
 		# Format before instance_count — changing it afterwards wipes the buffer.
 		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.mesh = _welded_mesh(key, b["scene"], b["pre"])
+		mm.mesh = _welded_mesh(key, b["scene"], b["pre"], b["remap"])
 		mm.instance_count = xforms.size()
 		for i in xforms.size():
 			mm.set_instance_transform(i, xforms[i])
 		var mmi := MultiMeshInstance3D.new()
 		mmi.multimesh = mm
+		if not b["shadows"]:
+			mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		var g: Rect2 = grid.grid_rect()
 		mmi.custom_aabb = AABB(
 			Vector3(g.position.x - 2000.0, -400.0, g.position.y - 2000.0),
@@ -966,8 +997,81 @@ func _build_taxiway_tile(cell: Vector2i, centre: Vector2) -> void:
 	# Lifted onto the pavement band. The kit lays its pavement flat at y=0, real
 	# aerodrome fashion, which put it exactly coplanar with the ground and lost
 	# every z-fight — the taxiways instantiated correctly and drew nothing at all.
-	_add_model("tx:" + chosen, TX_MODELS[chosen], TX_PRE,
-		Transform3D(Basis(Vector3.UP, float(steps) * PI * 0.5), w3(centre, H_PAVEMENT)))
+	# Which of the four corner shoulders to repaint. See _tx_corner_of.
+	var repaint := 0
+	for i in 4:
+		var corner: int = TX_CORNERS[i]
+		# The piece's own corner, carried round to the world by the same rotation
+		# the piece itself gets.
+		for k in steps:
+			corner = _tx_rot(corner)
+		var d := Vector2i(1 if corner & TX_E else -1, -1 if corner & TX_N else 1)
+		if _tx_is_pavement(cell + d):
+			repaint |= 1 << i
+
+	# Part of the key, because the weld is cached and the remap only runs on a
+	# miss: two tiles of the same piece with different corners open are two
+	# different meshes.
+	var mask_key := repaint
+	_add_model("tx:%s:%d" % [chosen, repaint], TX_MODELS[chosen], TX_PRE,
+		Transform3D(Basis(Vector3.UP, float(steps) * PI * 0.5), w3(centre, H_PAVEMENT)),
+		func(node: String, mat: String, box: AABB) -> String:
+			if mat != "shoulder_asphalt" or not node.begins_with("shoulder"):
+				return mat
+			var c := _tx_corner_of(box)
+			if c < 0 or not (mask_key & (1 << c)):
+				return mat
+			# Repainted, NOT dropped. The fillet sharing this corner box is only a
+			# quarter-disc; deleting the shoulder around it would leave a crescent
+			# of bare ground inside what should read as unbroken pavement.
+			return "taxiway_concrete",
+		# The kit is ground-plane geometry, and it does not lie perfectly flat: the
+		# pavement, its shoulders and the turn fillets are separate slabs at
+		# slightly different heights. Under a low sun each fillet's curved edge
+		# threw a shadow across the slab beside it, which is the quarter-circle of
+		# shade that appeared at junctions and, worst of all, over an apron, where
+		# every cell is a crossroads and so has four of them.
+		#
+		# Flat ground has no business casting a shadow anyway. The kit's signs and
+		# edge lights lose theirs too, but they are a couple of units tall and
+		# nobody will miss them.
+		false)
+
+
+func _tx_is_pavement(c: Vector2i) -> bool:
+	var t: int = grid.tile_type(c)
+	return t == AirportGrid.TileType.TAXIWAY or t == AirportGrid.TileType.RUNWAY \
+		or t == AirportGrid.TileType.STAND
+
+
+# Every piece carries a dark asphalt shoulder around the outside of its pavement.
+# On the four-way and three-way pieces part of that shoulder is a small square in
+# the DIAGONAL corner, filling the outside of the turn's fillet — which is right
+# for a junction standing in grass, and wrong in the middle of an apron, where it
+# reads as a quarter-circle of shadow dropped on continuous concrete.
+#
+# So a corner shoulder is repainted as pavement whenever the tile diagonally
+# beyond it is pavement too. Identified by geometry rather than by name: the kit's
+# names are laid out in its own frame and do not survive the mapping (`corner`
+# opens north and west, and `cross`'s "shoulder_sw" sits at its north-west).
+#
+# Corner order matches TX_CORNERS: 0 NW, 1 NE, 2 SE, 3 SW.
+const TX_CORNERS := [TX_N | TX_W, TX_N | TX_E, TX_S | TX_E, TX_S | TX_W]
+
+
+func _tx_corner_of(box: AABB) -> int:
+	var t: float = AirportGrid.TILE
+	# Edge strips and end caps run the full length of a side, so bounding both
+	# axes is what separates a corner square from them. Sign bases share the
+	# shoulder material and are smaller still, which the offset test below drops.
+	if box.size.x > t * 0.6 or box.size.z > t * 0.6:
+		return -1
+	var c: Vector3 = box.position + box.size * 0.5
+	if absf(c.x) < t * 0.25 or absf(c.z) < t * 0.25:
+		return -1
+	if c.z < 0.0:
+		return 1 if c.x > 0.0 else 0
+	return 2 if c.x > 0.0 else 3
 
 
 # A road is a narrow ribbon rather than a full tile of tarmac, so landside stops

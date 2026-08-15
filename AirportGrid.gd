@@ -1163,44 +1163,49 @@ func from_dict(d: Dictionary) -> void:
 # --- starting layout ---
 
 func seed_starter_airport() -> void:
-	# The whole movement area sits two rows further south than it used to. A pier
-	# is six cells now and a stand three, and the old stack ran the apron straight
-	# through where the pier's last two cells go. Everything below the buildings
-	# moved together, so the loop the layout was tuned around is unchanged in
-	# shape — only its offset.
-	place_runway_seg(cell_to_world(Vector2i(4, 14)), cell_to_world(Vector2i(19, 14)))
+	# The stack, north to south, and every row of it is spoken for: three cells of
+	# access road, the hall, a six-cell pier with the stands on its southern half,
+	# the apron, one row of links, the parallel taxiway, the runway stubs, and the
+	# runway. Eighteen owned rows, fourteen of them used.
+	#
+	# The road is three cells because one looked like the terminal had been built
+	# on the fenceline — there was no approach to it, just a kerb. The rows for
+	# that came from the apron-to-parallel links, which used to be two cells deep
+	# and had no reason to be: what makes the loop work is that there are THREE of
+	# them, not how long each one is.
+	place_runway_seg(cell_to_world(Vector2i(4, 15)), cell_to_world(Vector2i(19, 15)))
 	# A parallel taxiway plus an apron loop, so a blocked plane has a detour to
 	# find. A single-width spine deadlocks head-on traffic almost immediately.
 	for x in range(4, 22):
-		place_taxiway(Vector2i(x, 12))
+		place_taxiway(Vector2i(x, 13))
 	# Apron, parallel taxiway and the two links between them — the same loop the
 	# pre-pier layout used, and the reason it never deadlocked. Every stand below
 	# opens straight onto the apron row, so no aircraft ever enters a cul-de-sac.
 	# Hanging stands off single-width service lanes instead cost 6-7 gridlocks a
 	# run; widening those lanes fixed it but read as a double-width taxiway.
 	for x in range(8, 21):
-		place_taxiway(Vector2i(x, 9))
-	place_taxiway(Vector2i(4, 13))
-	place_taxiway(Vector2i(19, 13))
+		place_taxiway(Vector2i(x, 11))
+	place_taxiway(Vector2i(4, 14))
+	place_taxiway(Vector2i(19, 14))
 	# Links between the apron and the parallel taxiway. Three, not two: with only
 	# the ends joined, a departure pushing back met an arrival head-on and the
 	# nearest detour was the full length of the apron, which is what "gridlocked
 	# outbound" was. A middle link gives blocked traffic somewhere to go without
 	# widening anything.
-	for y in [10, 11]:
-		for x in [8, 13, 20]:
-			place_taxiway(Vector2i(x, y))
+	for x in [8, 13, 20]:
+		place_taxiway(Vector2i(x, 12))
 
 	# The landside spine, north to south: road in from the map edge, car parks
 	# beside it, the hall across the top, then a pier hanging off it at right
 	# angles — the 1-to-N relationship the building model exists for — with a
 	# stand on each flank. Every stand touches the pier and nothing touches the
 	# hall.
-	place_road(Vector2i(13, 0))
-	place_parking(Vector2i(12, 0))
-	place_parking(Vector2i(14, 0))
-	place_terminal(building_cells(Vector2i(10, 1), TERMINAL_SIZE, 0), 0)
-	place_concourse(building_cells(Vector2i(12, 3), CONCOURSE_SIZE, 0), 0)
+	for y in 3:
+		place_road(Vector2i(13, y))
+	place_parking(Vector2i(12, 2))
+	place_parking(Vector2i(14, 2))
+	place_terminal(building_cells(Vector2i(10, 3), TERMINAL_SIZE, 0), 0)
+	place_concourse(building_cells(Vector2i(12, 5), CONCOURSE_SIZE, 0), 0)
 
 	# The column order across the apron is: taxilane, stands, PIER, stands,
 	# taxilane. Every stand therefore has the pier on one flank and pavement on
@@ -1230,8 +1235,8 @@ func seed_starter_airport() -> void:
 	# second stand on each flank, but taking it means adding the passing room to
 	# go with it — a decision for the player rather than a trap the opening
 	# layout walks them into.
-	for y in [7, 8]:
+	for y in [9, 10]:
 		place_taxiway(Vector2i(9, y))
 		place_taxiway(Vector2i(15, y))
-	for anchor in [Vector2i(10, 6), Vector2i(13, 6)]:
+	for anchor in [Vector2i(10, 8), Vector2i(13, 8)]:
 		place_stand(stand_cells_for(anchor, 0), 0)
