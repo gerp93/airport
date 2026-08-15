@@ -53,6 +53,30 @@ const CONCOURSE_MODEL_LEN := 120.5
 const CONCOURSE_MODEL_W := 30.0
 const STAND_MODEL := preload("res://assets/models/stand.glb")
 
+# Landside. The road tile is a 2-unit square laid out like the taxiway kit — its
+# carriageway runs along local z — so it scales to the tile the same way.
+#
+# There is only the ONE road piece. Corners, tees and crossroads are built by
+# laying it twice, once per axis, and dropping whichever of its markings would be
+# wrong for that junction (see _build_road_tile). A curved piece was tried and
+# does not fit the grid: its arc is centred on the tile CORNER with a centreline
+# radius of about 1.45 tiles, so the carriageway leaves the tile edge nearly half
+# a tile off centre and is roughly half the straight's width. A one-tile curve
+# would need the arc centred on the corner at centreline radius 1.0, meeting both
+# edges at their midpoints, and the same 1.7-unit carriageway.
+const ROAD_MODEL := preload("res://assets/models/road.glb")
+const ROAD_MODEL_TILE := 2.0
+const ROAD_SCALE := AirportGrid.TILE / ROAD_MODEL_TILE
+const ROAD_PRE := Transform3D(
+	Basis(Vector3(ROAD_SCALE, 0.0, 0.0), Vector3(0.0, ROAD_SCALE, 0.0),
+		Vector3(0.0, 0.0, ROAD_SCALE)),
+	Vector3.ZERO)
+
+# The car park is a whole multi-storey ramp, cars and all, authored at world scale
+# — 31.5 units across a 32-unit tile — so it needs no scaling, only turning so its
+# ramp faces the road.
+const PARKING_MODEL := preload("res://assets/models/parking.glb")
+
 # --- projection -------------------------------------------------------------
 
 # 2D world coords map to 3D as (x, height, y): the sim's screen-down axis becomes
@@ -74,8 +98,6 @@ const COL_FIELD := Color(0.19, 0.31, 0.19)
 const COL_TAXIWAY := Color(0.40, 0.40, 0.43)
 const COL_TERMINAL := Color(0.36, 0.33, 0.45)
 const COL_TERMINAL_EDGE := Color(0.62, 0.58, 0.78)
-const COL_ROAD := Color(0.24, 0.24, 0.26)
-const COL_PARKING := Color(0.30, 0.31, 0.33)
 const COL_RUNWAY := Color(0.28, 0.28, 0.30)
 const COL_STAND_FREE := Color(0.18, 0.42, 0.18)
 const COL_STAND_BUSY := Color(0.75, 0.32, 0.25)
@@ -112,7 +134,6 @@ const PLANE_SCALE_FUDGE := 2.0
 # one tile by the grid, so it is the fixed middle of the ratio and the other two
 # move around it.
 const RUNWAY_WIDTH_TILES := 1.2
-const ROAD_WIDTH_TILES := 0.34
 
 # Shared with Main's help overlay so the two listings cannot drift apart.
 const CAMERA_HINT := "middle-drag pan · right-drag rotate · wheel zoom · arrows pan · , . rotate 45° · Home reset"
@@ -864,12 +885,7 @@ func _build_tiles() -> void:
 			AirportGrid.TileType.ROAD:
 				_build_road_tile(cell, centre)
 			AirportGrid.TileType.PARKING:
-				_add("park", "box", _mat("park", COL_PARKING),
-					Vector3(t, H_PAVEMENT, t), w3(centre, H_PAVEMENT * 0.5))
-				for i in 3:
-					var off: float = t * ((float(i) + 0.5) / 3.0 - 0.5)
-					_add("baymark", "box", _mat("baymark", Color(0.75, 0.75, 0.8)),
-						Vector3(1.4, 0.6, t * 0.62), w3(centre + Vector2(off, 0.0), H_MARKING))
+				_build_parking_tile(cell, centre)
 			AirportGrid.TileType.CONCOURSE:
 				pass  # Merged into runs below, so a concourse reads as one building.
 
@@ -1074,37 +1090,91 @@ func _tx_corner_of(box: AABB) -> int:
 	return 2 if c.x > 0.0 else 3
 
 
-# A road is a narrow ribbon rather than a full tile of tarmac, so landside stops
-# reading as more apron. Because it is that much narrower than its own tile, it
-# has to be built as a junction patch plus an arm toward each neighbour — a
-# single centred quad would leave gaps at every corner and T-junction.
+# One ramp per tile, turned so its entrance meets the road. The model's ramp
+# landing sits on its +z side, which is the same "local +z is the business end"
+# convention the pier mesh uses, so aiming it is one atan2.
+#
+# 672 meshes, cars included — easily the heaviest model in the game, and the
+# reason it goes through the welder like everything else rather than being
+# instantiated per car park.
+func _build_parking_tile(cell: Vector2i, centre: Vector2) -> void:
+	var face := Vector2(0.0, 1.0)
+	for d in [Vector2i(0, 1), Vector2i(1, 0), Vector2i(0, -1), Vector2i(-1, 0)]:
+		if grid.tile_type(cell + d) == AirportGrid.TileType.ROAD:
+			face = Vector2(d)
+			break
+	_add_model("parking", PARKING_MODEL, Transform3D.IDENTITY,
+		Transform3D(Basis(Vector3.UP, atan2(face.x, face.y)), w3(centre, H_PAVEMENT)))
+
+
+# Does the road carry on into this cell? The map edge counts: that is the airport
+# entrance, and stopping half a tile short would leave it hanging in the grass.
+# So do car parks, which a road has to actually arrive at.
+func _road_links(c: Vector2i) -> bool:
+	if not grid.in_bounds(c):
+		return true
+	var t: int = grid.tile_type(c)
+	return t == AirportGrid.TileType.ROAD or t == AirportGrid.TileType.PARKING
+
+
+# The kit has one piece — a straight, two lanes, running along its local z — so
+# every junction is built by laying that piece TWICE, once per axis, and dropping
+# whichever of its markings the junction makes wrong.
+#
+# The trick is that the piece's edge lines run down its two long sides, so the
+# north-south copy draws the west and east edges and the east-west copy draws the
+# north and south ones. Between them they can draw any subset of the four sides.
+# An edge line is kept only where the road does NOT continue, so a corner ends up
+# lined along its outside and open on the inside, a crossroads is open all round,
+# and a dead end gets closed off. Centre dashes are the mirror image: kept only
+# where the road DOES continue, so a stub does not paint dashes into the grass.
+#
+# Only the first copy brings its asphalt. Two full-tile slabs at the same height
+# is a z-fight, and the second one has nothing else to contribute.
 func _build_road_tile(cell: Vector2i, centre: Vector2) -> void:
-	var t: float = AirportGrid.TILE
-	var w: float = t * ROAD_WIDTH_TILES
-	var mat := _mat("road", COL_ROAD)
-	var mark := _mat("roadmark", Color(0.85, 0.8, 0.4))
+	var link := 0
+	for pair in [[Vector2i(0, -1), TX_N], [Vector2i(1, 0), TX_E],
+			[Vector2i(0, 1), TX_S], [Vector2i(-1, 0), TX_W]]:
+		if _road_links(cell + (pair[0] as Vector2i)):
+			link |= int(pair[1])
 
-	_add("road", "box", mat, Vector3(w, H_PAVEMENT, w), w3(centre, H_PAVEMENT * 0.5))
+	for steps in 2:
+		# The piece's own sides, carried round to the world by the same rotation
+		# the piece gets — exactly as the taxiway corners are.
+		var side := {}
+		for d in [TX_N, TX_E, TX_S, TX_W]:
+			var world: int = d
+			for k in steps:
+				world = _tx_rot(world)
+			side[d] = (link & world) != 0
 
-	for d in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
-		var n: Vector2i = cell + d
-		var connects: bool = grid.tile_type(n) == AirportGrid.TileType.ROAD
-		# Run out to the map edge as well: that is the airport entrance, and
-		# stopping half a tile short would leave it hanging in the grass.
-		if not connects and not grid.in_bounds(n):
-			connects = true
-		if not connects:
-			continue
+		var keep_w: bool = not side[TX_W]
+		var keep_e: bool = not side[TX_E]
+		var keep_n: bool = side[TX_N]
+		var keep_s: bool = side[TX_S]
+		var slab := steps == 0
+		var key := "road:%d:%d%d%d%d%d" % [
+			steps, int(keep_w), int(keep_e), int(keep_n), int(keep_s), int(slab)]
 
-		var v := Vector2(d)
-		var arm: Vector2 = centre + v * (t * 0.25)
-		var size := Vector3(w, H_PAVEMENT, t * 0.5)
-		if absf(v.x) > 0.0:
-			size = Vector3(t * 0.5, H_PAVEMENT, w)
-		_add("road", "box", mat, size, w3(arm, H_PAVEMENT * 0.5))
-
-		var dash := Vector3(w * 0.34, 0.6, 1.6) if absf(v.x) > 0.0 else Vector3(1.6, 0.6, w * 0.34)
-		_add("roadmark", "box", mark, dash, w3(centre + v * (t * 0.3), H_MARKING))
+		_add_model(key, ROAD_MODEL, ROAD_PRE,
+			Transform3D(Basis(Vector3.UP, float(steps) * PI * 0.5),
+				w3(centre, H_PAVEMENT)),
+			func(node: String, mat: String, box: AABB) -> String:
+				var c: Vector3 = box.position + box.size * 0.5
+				if node.begins_with("asphalt"):
+					return mat if slab else ""
+				if node.begins_with("edge_line"):
+					# West and east are the piece's own long sides.
+					if c.x < 0.0:
+						return mat if keep_w else ""
+					return mat if keep_e else ""
+				if node.begins_with("center_line"):
+					if c.z < 0.0:
+						return mat if keep_n else ""
+					return mat if keep_s else ""
+				return mat,
+			# Flat ground, same as the taxiway kit: it must not shade itself.
+			false)
 
 
 # Terminals, concourses and stands are each a single authored mesh whose

@@ -92,6 +92,14 @@ Two things they exist for, both about the taxiway kit:
   ground. Corners are identified by **geometry, not name** — the kit's names are
   in its own frame and do not survive the mapping (`corner` opens north and west,
   and `cross`'s "shoulder_sw" sits at its north-west).
+- **Roads are autotiled from ONE straight piece, laid twice per cell.** The piece
+  carries its edge lines down its two long sides, so the north-south copy can
+  draw the west and east edges and the east-west copy the north and south ones —
+  between them any subset of the four sides. An edge line is kept only where the
+  road does *not* continue and a centre dash only where it does, which gives
+  corners lined on the outside, open crossroads, and closed dead ends with no
+  second piece. Only the first copy brings its asphalt; two full-tile slabs at
+  one height is a z-fight.
 - **The kit casts no shadow.** Its pavement, shoulders and fillets are separate
   slabs at slightly different heights, so under a low sun every fillet's curved
   edge threw a quarter-circle of shade across the slab beside it — four per cell
