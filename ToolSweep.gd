@@ -131,6 +131,31 @@ func _check_rotation(main) -> void:
 	_expect(not grid.terminal_is_roaded(grid.get_terminal(tid)),
 		"a terminal with no road must not count as roaded")
 
+	# Halls bought side by side are one building, so a road reaching any of them
+	# reaches all of them. Without that, a second hall added to hang more piers
+	# off silently contributes no passenger capacity at all.
+	var far: Array = grid.building_cells(Vector2i(22, 3), AG.TERMINAL_SIZE, 0)
+	var fid: int = grid.place_terminal(far, 0)
+	_expect(grid.terminal_run(grid.get_terminal(fid)).size() == 2,
+		"halls sharing an edge must be one run")
+	_expect(not grid.terminal_is_roaded(grid.get_terminal(fid)),
+		"a run no road reaches must not count as roaded")
+	# Out to the map edge, or it is not a landside road at all and serves nothing.
+	grid.place_road(Vector2i(21, 0))
+	grid.place_road(Vector2i(21, 1))
+	_expect(grid.terminal_is_roaded(grid.get_terminal(fid)),
+		"a road touching either hall must road the whole run")
+	# ...but only halls laid the same way. Two meeting at right angles are a
+	# corner, and nothing sensible can be drawn straight through the join.
+	var turned: Array = grid.building_cells(Vector2i(28, 1), AG.TERMINAL_SIZE, 1)
+	var turned_id: int = grid.place_terminal(turned, 1)
+	_expect(grid.terminal_run(grid.get_terminal(turned_id)).size() == 1,
+		"halls at different rotations must not merge into one run")
+	grid.demolish(Vector2i(22, 3))
+	grid.demolish(Vector2i(28, 1))
+	grid.demolish(Vector2i(21, 0))
+	grid.demolish(Vector2i(21, 1))
+
 	# A pier has to meet a hall end-on; floating in a field is not a concourse.
 	var loose: Array = grid.building_cells(Vector2i(22, 8), AG.CONCOURSE_SIZE, 0)
 	_expect(not grid.can_place_concourse(loose), "a concourse must touch a terminal")

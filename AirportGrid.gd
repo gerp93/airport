@@ -328,11 +328,45 @@ func get_concourse(id: int) -> Variant:
 # A terminal is live only if a road reaches it: it is the landside building, so
 # it is where passengers actually arrive. Concourses are airside and never need
 # one.
+# Halls placed side by side are ONE building — Render3D draws a run of them as a
+# single continuous terminal — so they have to behave as one here too. A road
+# reaching any part of the run reaches all of it.
+#
+# Without this, buying a second hall to hang more piers off would silently add no
+# passenger capacity at all unless the player also ran the road along the whole
+# frontage. That is a trap rather than a decision, and it would contradict what
+# the building visibly is.
 func terminal_is_roaded(t: Dictionary) -> bool:
-	for c in t["cells"]:
-		if is_road_served(c):
-			return true
+	for hall in terminal_run(t):
+		for c in hall["cells"]:
+			if is_road_served(c):
+				return true
 	return false
+
+
+# Every hall contiguous with this one, itself included. Rotation has to match:
+# two halls meeting at right angles are a corner, not a longer building, and
+# nothing sensible can be drawn through the join.
+func terminal_run(t: Dictionary) -> Array:
+	var run: Array = [t]
+	var seen := {int(t["id"]): true}
+	var queue: Array = [t]
+	while not queue.is_empty():
+		var cur: Dictionary = queue.pop_back()
+		for c in cur["cells"]:
+			for n in neighbors(c):
+				if tile_type(n) != TileType.TERMINAL:
+					continue
+				var id: int = tiles[n]["entity_id"]
+				if seen.has(id):
+					continue
+				var other = get_terminal(id)
+				if other == null or int(other["rot"]) != int(cur["rot"]):
+					continue
+				seen[id] = true
+				run.append(other)
+				queue.append(other)
+	return run
 
 
 # A road leaves the property when it touches land the airport does not own, or

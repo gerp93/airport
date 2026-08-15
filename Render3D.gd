@@ -48,6 +48,10 @@ const TOWER_SCALE := 1.6
 # rather than the mesh's: it is stretched along its run to whatever CONCOURSE_SIZE
 # says, out of a mesh authored 30 wide by 120.5 long.
 const TERMINAL_MODEL := preload("res://assets/models/terminal.glb")
+# The hall mesh is authored 8 units shorter than its own 6-tile footprint, which
+# is where the margin at each end comes from. Stretching a run keeps that margin,
+# so a run of one comes out at scale exactly 1.0 and is untouched.
+const TERMINAL_MODEL_LEN := 184.0
 const CONCOURSE_MODEL := preload("res://assets/models/concourse.glb")
 const CONCOURSE_MODEL_LEN := 120.5
 const CONCOURSE_MODEL_W := 30.0
@@ -1186,10 +1190,57 @@ func _build_road_tile(cell: Vector2i, centre: Vector2) -> void:
 # meets the terminal outward, and the hall and stand meshes are centred on their
 # own footprints.
 func _build_terminals() -> void:
+	var drawn := {}
 	for t in grid.terminals:
-		_place_building("terminal", TERMINAL_MODEL, t["cells"], _building_yaw(t["cells"]))
+		if drawn.has(int(t["id"])):
+			continue
+		var run: Array = grid.terminal_run(t)
+		for h in run:
+			drawn[int(h["id"])] = true
+		_place_hall_run(run)
 	for c in grid.concourses:
 		_place_pier(c)
+
+
+# Halls bought side by side are drawn as ONE building, stretched across the whole
+# frontage, which is how a terminal grows here: more halls, more frontage, more
+# piers to hang off it.
+#
+# Stretching rather than butting the meshes together is deliberate. The mesh's
+# floor slab runs the full 184 units but its vault stops 7 short at each end, so
+# two of them placed nose to tail leave a hole in the roof — and their glazed
+# gables end up facing each other a few units apart, inside what is meant to be
+# one hall. One stretched mesh has no join to get wrong. The bays stretch with it,
+# exactly as the pier's do.
+func _place_hall_run(run: Array) -> void:
+	var cells: Array = []
+	for h in run:
+		cells.append_array(h["cells"] as Array)
+
+	var lo: Vector2i = cells[0]
+	var hi: Vector2i = cells[0]
+	for c in cells:
+		lo = Vector2i(mini(lo.x, c.x), mini(lo.y, c.y))
+		hi = Vector2i(maxi(hi.x, c.x), maxi(hi.y, c.y))
+	var span: Vector2i = hi - lo + Vector2i.ONE
+
+	# Only a run that fills a clean rectangle can be one building. A staggered or
+	# L-shaped group falls back to a mesh each, which is what it looks like.
+	if span.x * span.y != cells.size():
+		for h in run:
+			_place_building("terminal", TERMINAL_MODEL, h["cells"], _building_yaw(h["cells"]))
+		return
+
+	var t: float = AirportGrid.TILE
+	# The mesh's long axis is its local x, and _building_yaw turns that along the
+	# run. Length only: width and height stay as authored, the same rule the pier
+	# follows and for the same reason.
+	var margin: float = float(AirportGrid.TERMINAL_SIZE.x) * t - TERMINAL_MODEL_LEN
+	var along: float = float(maxi(span.x, span.y)) * t - margin
+	_add_model("terminal", TERMINAL_MODEL, Transform3D.IDENTITY, Transform3D(
+		Basis(Vector3.UP, _building_yaw(cells))
+			* Basis.from_scale(Vector3(along / TERMINAL_MODEL_LEN, 1.0, 1.0)),
+		w3(_cells_centre(cells))))
 
 
 # Centred on the footprint's middle, turned to run along its long axis.

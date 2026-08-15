@@ -211,6 +211,26 @@ of their own; **stands** attach to a *pier*, never to the hall, and only a stand
 touching a pier gets a jet bridge. Demolishing a hall orphans its piers rather
 than destroying them.
 
+**A terminal grows by buying halls side by side, and a run of them is ONE
+building.** `Render3D._place_hall_run()` draws a contiguous run as a single mesh
+stretched across the whole frontage, so the way to fit three piers is three halls,
+not one enormous one. Stretching beats butting the meshes together: the mesh's
+floor slab runs the full 184 units but its vault stops 7 short at each end, so two
+placed nose to tail leave a hole in the roof and put two glazed gables a few units
+apart inside what is meant to be one hall. The margin is preserved by the stretch,
+so a run of one comes out at scale exactly 1.0 and is untouched. A run that is not
+a clean rectangle falls back to a mesh each.
+
+Because they are one building visually, `terminal_is_roaded()` treats the run as
+one: a road reaching any hall roads them all. Otherwise a second hall would
+silently add no capacity until the road was extended along the whole frontage —
+a trap, not a decision. Runs need matching `rot`; two halls at right angles are a
+corner and nothing sensible draws through the join.
+
+Piers land every **7 columns** — a pier, its two flanking stands at two cells
+each, and a service lane either side — so three of them want about 15 cells of
+frontage.
+
 Two of those three sizes are *not* the mesh's own, and both for a reason:
 
 - **A stand is three cells across a 56-unit mesh, and the odd number is the
