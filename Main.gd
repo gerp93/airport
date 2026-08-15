@@ -3,21 +3,24 @@ extends Node2D
 const AirportGrid = preload("res://AirportGrid.gd")
 const Regions = preload("res://Regions.gd")
 const KvgUpdate = preload("res://addons/kvg_update/kvg_update.gd")
+const Render3D = preload("res://Render3D.gd")
 
 const UPDATE_REPO := "gerp93/airport"
 
-enum Tool { SELECT, TAXIWAY, RUNWAY, GATE_SMALL, GATE_LARGE, TERMINAL, ROAD, PARKING, DEMOLISH }
+enum Tool { SELECT, TAXIWAY, RUNWAY, STAND, TERMINAL, CONCOURSE, ROAD, PARKING, DEMOLISH, LAND }
 
 const TOOL_BUTTONS := {
 	Tool.SELECT: "SelectBtn", Tool.TAXIWAY: "TaxiwayBtn", Tool.RUNWAY: "RunwayBtn",
-	Tool.GATE_SMALL: "GateSmallBtn", Tool.GATE_LARGE: "GateLargeBtn",
-	Tool.TERMINAL: "TerminalBtn", Tool.ROAD: "RoadBtn",
+	Tool.STAND: "StandBtn", Tool.TERMINAL: "TerminalBtn",
+	Tool.CONCOURSE: "ConcourseBtn", Tool.ROAD: "RoadBtn",
 	Tool.PARKING: "ParkingBtn", Tool.DEMOLISH: "DemolishBtn",
+	Tool.LAND: "LandBtn",
 }
 const TOOL_KEYS := {
 	KEY_ESCAPE: Tool.SELECT, KEY_T: Tool.TAXIWAY, KEY_R: Tool.RUNWAY,
-	KEY_G: Tool.GATE_SMALL, KEY_H: Tool.GATE_LARGE, KEY_E: Tool.TERMINAL,
+	KEY_G: Tool.STAND, KEY_E: Tool.TERMINAL, KEY_C: Tool.CONCOURSE,
 	KEY_O: Tool.ROAD, KEY_P: Tool.PARKING, KEY_X: Tool.DEMOLISH,
+	KEY_L: Tool.LAND,
 }
 
 const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
@@ -29,17 +32,17 @@ const AIRLINES := ["SkyNorth", "BlueWing", "CoastAir", "PineJet", "Vantage"]
 # regional jet is both realistic and worth serving.
 const CLASSES := [
 	{
-		"name": "Regional", "code": "R", "min_runway": 6, "gate_size": 1,
+		"name": "Regional", "code": "R", "min_runway": 6,
 		"fee_min": 700, "fee_max": 1_100, "turnaround": 4.0, "scale": 0.7,
 		"term_units": 1,
 	},
 	{
-		"name": "Narrowbody", "code": "N", "min_runway": 12, "gate_size": 1,
+		"name": "Narrowbody", "code": "N", "min_runway": 12,
 		"fee_min": 1_900, "fee_max": 2_900, "turnaround": 8.0, "scale": 1.0,
 		"term_units": 2,
 	},
 	{
-		"name": "Widebody", "code": "W", "min_runway": 18, "gate_size": 2,
+		"name": "Widebody", "code": "W", "min_runway": 18,
 		"fee_min": 6_500, "fee_max": 9_500, "turnaround": 13.0, "scale": 1.35,
 		"term_units": 3,
 	},
@@ -67,13 +70,47 @@ const REVENUE_SCALE := 40
 
 const COST_TAXIWAY := 500_000
 const COST_RUNWAY_TILE := 1_500_000
-const COST_GATE_TILE := 4_500_000
+# A stand is a fixed 2x2 — the stand mesh's own footprint — and takes any
+# aircraft. Priced as the old widebody stand did (2 tiles at $4.5M), since that
+# is now the only kind there is.
+const COST_STAND := 9_000_000
+# Facilities are equipment and can be sold on; buildings cannot. Selling a
+# facility still recovers this share, but DEMOLITION never refunds anything —
+# see COST_DEMOLISH_TILE.
 const REFUND_RATE := 0.5
+
+# Demolition costs money rather than returning it, at a flat rate per tile
+# regardless of what stood there — clearing a concourse section is the same
+# machine-hours as clearing a taxiway.
+const COST_DEMOLISH_TILE := 250_000
+
+# Anything at or above this asks for confirmation. Covers land tracts, concourse
+# sections, the tower and the maintenance hangar; a stray click on any of those
+# is otherwise unrecoverable.
+const CONFIRM_THRESHOLD := 5_000_000
 const TOW_FEE := 25_000
 
 const UPKEEP_RUNWAY := 2_000
 const UPKEEP_STAND := 600
 const DAY_LENGTH := 90.0
+
+# --- financing ---
+#
+# The bank lends against reputation rather than against assets. That is the
+# point of it: a well-run airport can borrow into its next expansion, a failing
+# one cannot borrow its way out. At full reputation the ceiling is $40M against
+# a $28M opening balance, so credit roughly doubles what the first few moves
+# can reach without ever being free money.
+#
+# Interest is charged daily on the outstanding balance and nothing amortises
+# automatically — the player chooses when to pay down. At REVENUE_SCALE a
+# runway returns something like 6-7% a day, so the rate has to sit well under
+# that or borrowing would never be worth doing; too far under and debt is
+# strictly free. 0.6%/day is roughly a quarter of a mature airport's daily
+# take once the ceiling is drawn in full.
+const LOAN_LIMIT_PER_REP := 400_000
+const LOAN_RATE_DAILY := 0.006
+const LOAN_STEP := 5_000_000
 
 # Facilities are bought in units; each unit adds concurrency and daily upkeep,
 # so scaling up traffic means scaling up overhead.
@@ -86,18 +123,22 @@ const FACILITIES := [
 	{
 		"key": "tower", "name": "Control Tower", "cost": 28_000_000,
 		"upkeep": 9_000, "per_unit": 4, "unit": "airborne",
+		"desc": "Caps how many aircraft may be airborne at once. Past the cap, inbound flights are turned away and cost reputation.",
 	},
 	{
 		"key": "crew", "name": "Ground Crew Team", "cost": 1_500_000,
 		"upkeep": 3_200, "per_unit": 2, "unit": "turnarounds",
+		"desc": "Caps simultaneous turnarounds. A landed aircraft sits at its stand until a crew frees up.",
 	},
 	{
 		"key": "fuel", "name": "Fuel Truck", "cost": 600_000,
 		"upkeep": 900, "per_unit": 2, "unit": "refuels",
+		"desc": "Caps simultaneous refuels. A turnaround needs a crew AND a truck, so the scarcer of the two is what limits you.",
 	},
 	{
 		"key": "mech", "name": "Maintenance Hangar", "cost": 22_000_000,
 		"upkeep": 7_500, "per_unit": 1, "unit": "checks",
+		"desc": "Lets you handle aircraft due a maintenance check. Without a hangar they divert, costing reputation.",
 	},
 ]
 const START_FACILITIES := {"tower": 1, "crew": 1, "fuel": 1, "mech": 0}
@@ -107,10 +148,34 @@ const START_FACILITIES := {"tower": 1, "crew": 1, "fuel": 1, "mech": 0}
 # stands it serves. This is the most compressed capital figure in the model:
 # a real terminal runs into the hundreds of millions and would swamp
 # everything else at this revenue scale.
-const COST_TERMINAL_TILE := 18_000_000
-const UPKEEP_TERMINAL_TILE := 6_000
-const TERM_UNITS_PER_TILE := 3
+# A terminal is a 6x2 hall and a concourse a 1x4 pier — both fixed-size, because
+# both are single authored meshes. Priced per building rather than per tile, and
+# deliberately set so the starter airport's economy lands where the old
+# three-tile concourse did: the hall's 12 tiles at 1 unit each give 12 passenger
+# units against the 9 the old layout nominally had (and the 3 it actually had,
+# since two of its three tiles were never road-served).
+const COST_TERMINAL := 54_000_000
+const UPKEEP_TERMINAL := 18_000
+const TERM_UNITS_PER_TILE := 1
+# Priced and charged PER TILE of pier, derived from the size rather than written
+# out, so lengthening a pier cannot quietly make it cheaper per tile. It went from
+# four tiles to six when stands widened to three cells, and holding the per-tile
+# figure is what keeps that a change in what a pier is rather than a discount on
+# one.
+#
+# Worth watching in a play session: $27M against $28M of starting cash makes this
+# the tightest single purchase in the game, and "the opening budget may be too
+# tight" was already an open balance question at $18M.
+const COST_CONCOURSE_TILE := 4_500_000
+const COST_CONCOURSE := COST_CONCOURSE_TILE * AirportGrid.CONCOURSE_SIZE.y
+const UPKEEP_CONCOURSE_TILE := 1_500
+const UPKEEP_CONCOURSE := UPKEEP_CONCOURSE_TILE * AirportGrid.CONCOURSE_SIZE.y
 # Landside: passengers arrive by road and have to leave their cars somewhere.
+# Raw land, priced per tile so a bigger parcel costs more. Cheap against what
+# gets built on it — the stand is that a tract is a lump sum you commit up front,
+# not that the dirt itself is expensive.
+const COST_LAND_TILE := 90_000
+
 const COST_ROAD_TILE := 400_000
 const UPKEEP_ROAD_TILE := 200
 const COST_PARKING_TILE := 6_000_000
@@ -139,8 +204,17 @@ const MAX_BLOCK_TIME := 20.0
 const REP_PER_TURNAROUND := 2
 const REP_MAX := 100
 
-const SAVE_PATH := "user://airport_save.dat"
-const SAVE_VERSION := 3
+const SAVE_SLOTS := 3
+
+
+# One file per slot. The pre-slot save lived at a single fixed path and is not
+# migrated: SAVE_VERSION moved at the same time, so it would be rejected anyway.
+static func save_path(slot: int) -> String:
+	return "user://airport_save_%d.dat" % slot
+# 4: "gates"/"gate_seq" became "stands"/"stand_seq" in the grid payload. Older
+# saves are rejected rather than migrated — the save-slot paths changed at the
+# same time, so nothing was preserved across that boundary anyway.
+const SAVE_VERSION := 4
 
 const AIRPORT_CODE := "HOME"
 const MAX_ROUTES := 8
@@ -168,6 +242,7 @@ const SPAWN_POS := Vector2(-60.0, 150.0)
 const AIR_ANCHOR := Vector2(110.0, 160.0)
 
 var grid: AirportGrid
+var render3d: Render3D
 # Enough for two or three meaningful opening moves rather than exactly one.
 var money := 28_000_000
 var day := 1
@@ -175,6 +250,10 @@ var day_time := 0.0
 var day_revenue := 0
 var last_day_revenue := 0
 var last_upkeep := 0
+var loan_principal := 0
+var last_interest := 0
+var sandbox := false
+var sandbox_btn: Button
 var facilities := {}
 var used := {"crew": 0, "fuel": 0, "term": 0, "mech": 0}
 var reputation := 100
@@ -212,6 +291,11 @@ var next_weather_at := 100.0
 
 var selected_plane_id := -1
 var tool: Tool = Tool.SELECT
+# Placement axis for anything wider than one tile: 0 runs east, 1 runs south.
+# Rotated with Q. R is already the Runway tool and moving it would invalidate
+# the shortcut sheet, so rotation took the next free key rather than the
+# conventional one.
+var build_rot := 0
 var hover_cell := AirportGrid.NOWHERE
 var drag_start := AirportGrid.NOWHERE
 var is_dragging := false
@@ -226,6 +310,38 @@ var is_dragging := false
 @onready var tool_info_label: Label = $UI/ToolInfoLabel
 @onready var log_label: RichTextLabel = $UI/LogLabel
 
+# Built in code rather than added to Main.tscn: it is a full-width overlay that
+# only ever appears during a closure, and keeping it here keeps the scene file
+# describing the permanent HUD.
+var closure_banner: Panel
+var closure_label: Label
+
+var bank_panel: Panel
+var bank_title: Label
+var bank_label: Label
+var bank_borrow: Button
+var bank_repay: Button
+
+var slot_panel: Panel
+var slot_rows: Array = []
+var help_panel: Panel
+var confirm_panel: Panel
+var confirm_label: Label
+var confirm_pending := false
+var _confirm_action: Callable = Callable()
+
+# Everything bought since the current pause began. While paused a purchase can be
+# undone for the full amount; resuming time locks the lot in. Cleared on resume,
+# on load, and whenever an entry is undone.
+#
+# Entries: {"kind": "tile"|"land"|"facility", "cost": int, plus
+#           "cells": Array[Vector2i] | "tract": int | "key": String}
+var last_slot := 1
+var pause_ledger: Array = []
+# Guards the re-entrancy of setting PauseBtn.button_pressed from inside its own
+# toggled handler.
+var _pause_guard := false
+
 
 func _ready() -> void:
 	randomize()
@@ -235,15 +351,24 @@ func _ready() -> void:
 	grid = AirportGrid.new()
 	grid.seed_starter_airport()
 
+	# The world is drawn in 3D by a Node3D child. A Node3D under a Node2D still
+	# renders — 3D goes through the viewport's World3D, independent of the 2D
+	# canvas — which lets `_draw()` below stay available for screen-space labels
+	# and leaves the whole $UI CanvasLayer untouched.
+	render3d = Render3D.new()
+	add_child(render3d)
+	render3d.attach(grid)
+
 	$UI/SelectBtn.pressed.connect(_set_tool.bind(Tool.SELECT))
 	$UI/TaxiwayBtn.pressed.connect(_set_tool.bind(Tool.TAXIWAY))
 	$UI/RunwayBtn.pressed.connect(_set_tool.bind(Tool.RUNWAY))
-	$UI/GateSmallBtn.pressed.connect(_set_tool.bind(Tool.GATE_SMALL))
-	$UI/GateLargeBtn.pressed.connect(_set_tool.bind(Tool.GATE_LARGE))
+	$UI/StandBtn.pressed.connect(_set_tool.bind(Tool.STAND))
 	$UI/TerminalBtn.pressed.connect(_set_tool.bind(Tool.TERMINAL))
+	$UI/ConcourseBtn.pressed.connect(_set_tool.bind(Tool.CONCOURSE))
 	$UI/RoadBtn.pressed.connect(_set_tool.bind(Tool.ROAD))
 	$UI/ParkingBtn.pressed.connect(_set_tool.bind(Tool.PARKING))
 	$UI/DemolishBtn.pressed.connect(_set_tool.bind(Tool.DEMOLISH))
+	$UI/LandBtn.pressed.connect(_set_tool.bind(Tool.LAND))
 
 	$UI/PauseBtn.toggled.connect(_on_pause_toggled)
 	$UI/Speed1Btn.pressed.connect(_set_speed.bind(1.0))
@@ -252,9 +377,26 @@ func _ready() -> void:
 	$UI/GameOverPanel/RestartBtn.pressed.connect(func(): get_tree().reload_current_scene())
 	$UI/RoutePanel/AcceptBtn.pressed.connect(accept_offer)
 	$UI/RoutePanel/DeclineBtn.pressed.connect(decline_offer)
-	$UI/SaveBtn.pressed.connect(save_game)
-	$UI/LoadBtn.pressed.connect(load_game)
+	# Both toolbar buttons open the same slot picker; F5/F9 remain the quick
+	# save/load against whichever slot was last used.
+	$UI/SaveBtn.pressed.connect(_toggle_slots)
+	$UI/LoadBtn.pressed.connect(_toggle_slots)
 	_refresh_save_buttons()
+	_build_hud_backdrops()
+	_build_closure_banner()
+	_build_confirm_dialog()
+	_build_slot_panel()
+	_build_help_panel()
+	_build_bank_panel()
+	$UI/HelpBtn.pressed.connect(_toggle_help)
+
+	# Below this the three HUD regions start eating each other; the layout code
+	# clamps rather than reflowing, so the floor is enforced here instead.
+	var win := get_window()
+	if win != null:
+		win.min_size = Vector2i(1120, 800)
+	get_viewport().size_changed.connect(_layout_ui)
+	_layout_ui()
 
 	# Godot's default Button style nearly vanishes on a dark panel, so the sidebar
 	# controls get an explicit one.
@@ -266,6 +408,7 @@ func _ready() -> void:
 		var b: Button = $UI/StartPanel.get_node("Opt%d" % i)
 		b.pressed.connect(_choose_setup.bind(i))
 		_style_button(b)
+	_build_sandbox_toggle()
 	# Headless balance runs can't click, so they take the first region.
 	if _echo_log or _auto_sign:
 		_choose_setup(0)
@@ -280,12 +423,849 @@ func _ready() -> void:
 		_style_button($UI/FacilityPanel.get_node("Row%dBuy" % i))
 		_style_button($UI/FacilityPanel.get_node("Row%dSell" % i))
 
-	add_log("Airport open. Build taxiways to connect runways and gates.")
+	add_log("Airport open. Build taxiways to connect runways and stands.")
 
 	# Headless/balance runs are deterministic test tooling, not a real play
 	# session — they shouldn't make a network call or depend on GitHub being up.
 	if not (_echo_log or _auto_sign):
 		_check_for_update()
+
+
+# --- responsive layout ---
+#
+# Every HUD position used to be a fixed offset authored against a 1440x900
+# window. At any other size the sidebar floated short of the right edge, the log
+# was stranded above the bottom, and the speed buttons sat *on top of* the route
+# panel. Positions are computed here instead, from the live viewport size, and
+# what Main.tscn still carries is only what the editor shows.
+#
+# The screen divides into three regions that never overlap: a top strip, a right
+# sidebar, and a full-width bottom bar. The sidebar stops where the bottom bar
+# begins, which is what buys the toolbar enough width to hold every tool.
+
+const UI_MARGIN := 10.0
+const UI_TOP_H := 92.0
+const UI_ROW_H := 32.0
+const UI_FAC_ROW_H := 44.0
+const UI_BANK_H := 102.0
+const UI_ROUTE_MIN := 176.0
+# Shares of the top strip, in the order the four blocks read. Proportional
+# rather than equal: the two right-hand blocks carry the longest lines, and
+# equal quarters clipped both of them.
+const UI_TOP_SHARE := [0.234, 0.255, 0.218, 0.293]
+
+var hud_top: Panel
+var hud_bottom: Panel
+
+
+# Two plates behind the HUD text. Labels over the 3D world were unreadable
+# against light terrain — desert tan and snow especially — and one backdrop per
+# region is both cheaper and tidier than a stylebox on each label.
+func _build_hud_backdrops() -> void:
+	hud_top = Panel.new()
+	hud_bottom = Panel.new()
+	for p in [hud_top, hud_bottom]:
+		var style := StyleBoxFlat.new()
+		style.bg_color = Color(0.05, 0.07, 0.09, 0.74)
+		style.border_color = Color(0.30, 0.38, 0.36, 0.7)
+		style.set_corner_radius_all(4)
+		p.add_theme_stylebox_override("panel", style)
+		p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		$UI.add_child(p)
+		# Added last, so they would otherwise paint over everything they exist
+		# to sit behind.
+		$UI.move_child(p, 0)
+	var top_style: StyleBoxFlat = hud_top.get_theme_stylebox("panel")
+	top_style.border_width_bottom = 1
+	var bottom_style: StyleBoxFlat = hud_bottom.get_theme_stylebox("panel")
+	bottom_style.border_width_top = 1
+
+
+func _layout_ui() -> void:
+	var vp: Vector2 = get_viewport_rect().size
+	var m := UI_MARGIN
+
+	var side_w: float = clampf(vp.x * 0.30, 300.0, 416.0)
+	var side_x: float = vp.x - side_w - m
+
+	# The sidebar's contents have a real minimum height, so it claims its space
+	# first and the log absorbs whatever is left. Sizing the log first is what
+	# pushed the route panel out through the bottom of its own panel.
+	var fac_h: float = 34.0 + UI_FAC_ROW_H * float(FACILITIES.size()) + 8.0
+	var route_top: float = UI_TOP_H + 8.0 + fac_h + 6.0 + UI_BANK_H + 6.0
+	var side_floor: float = route_top + UI_ROUTE_MIN
+
+	var log_h: float = clampf(vp.y * 0.16, 96.0, 170.0)
+	var info_y: float = vp.y - m - log_h - 6.0 - UI_ROW_H - 22.0
+	if info_y - 6.0 < side_floor:
+		info_y = side_floor + 6.0
+		log_h = maxf(72.0, vp.y - m - info_y - 22.0 - UI_ROW_H - 6.0)
+	var bar_y: float = info_y + 22.0
+	var log_y: float = bar_y + UI_ROW_H + 6.0
+
+	hud_top.position = Vector2(m - 6.0, -6.0)
+	hud_top.size = Vector2(vp.x - 2.0 * m + 12.0, UI_TOP_H + 6.0)
+	hud_bottom.position = Vector2(m - 6.0, info_y - 6.0)
+	hud_bottom.size = Vector2(vp.x - 2.0 * m + 12.0, vp.y - info_y + 6.0)
+
+	_layout_top_strip(vp, m)
+	_layout_bottom_bar(vp, m, bar_y, info_y, log_y, log_h)
+	_layout_sidebar(side_x, side_w, fac_h, info_y - 6.0)
+
+	# Modals are centred rather than anchored — they are transient and their
+	# contents are laid out once against a fixed panel size.
+	_centre(confirm_panel, Vector2(560, 268))
+	_centre(slot_panel, Vector2(640, 322))
+	_centre(help_panel, Vector2(724, 490))
+	_centre($UI/GameOverPanel, Vector2(500, 330))
+	_centre($UI/StartPanel, Vector2(600, 430))
+
+	# The closure banner belongs over the field, not over the sidebar.
+	var banner_w: float = clampf(side_x - m - 40.0, 320.0, 724.0)
+	closure_banner.position = Vector2(m + (side_x - m - banner_w) * 0.5, UI_TOP_H + 14.0)
+	closure_banner.size = Vector2(banner_w, 48.0)
+	closure_label.size = closure_banner.size
+
+
+func _centre(c: Control, want: Vector2) -> void:
+	var vp: Vector2 = get_viewport_rect().size
+	c.size = want
+	c.position = ((vp - want) * 0.5).floor()
+
+
+# The strip runs the full window width, above the sidebar rather than beside it.
+func _layout_top_strip(vp: Vector2, m: float) -> void:
+	var usable: float = vp.x - 2.0 * m - 24.0
+	var block_h := UI_TOP_H - 12.0
+	var cols := PackedFloat32Array()
+	for share in UI_TOP_SHARE:
+		cols.append(usable * float(share))
+
+	var stack := [money_label, rep_label, day_label, next_in_label]
+	for i in stack.size():
+		var lbl: Label = stack[i]
+		lbl.position = Vector2(m, 6.0 + 22.0 * float(i))
+		lbl.size = Vector2(cols[0], 22.0)
+
+	var x: float = m + cols[0] + 8.0
+	for entry in [[stats_label, cols[1]], [capacity_label, cols[2]], [hint_label, cols[3]]]:
+		var lbl: Label = entry[0]
+		var w: float = entry[1]
+		lbl.position = Vector2(x, 6.0)
+		lbl.size = Vector2(w, block_h)
+		# Narrow windows would otherwise smear these into each other.
+		lbl.clip_text = true
+		x += w + 8.0
+
+
+func _layout_bottom_bar(vp: Vector2, m: float, bar_y: float, info_y: float,
+		log_y: float, log_h: float) -> void:
+	# Save/Load sit to the right of the log, with the update prompt beneath them.
+	var sq := 90.0
+	var save_x: float = vp.x - m - sq
+	var load_x: float = save_x - 6.0 - sq
+	$UI/SaveBtn.position = Vector2(load_x, log_y)
+	$UI/SaveBtn.size = Vector2(sq, UI_ROW_H)
+	$UI/LoadBtn.position = Vector2(save_x, log_y)
+	$UI/LoadBtn.size = Vector2(sq, UI_ROW_H)
+	$UI/UpdateBtn.position = Vector2(load_x, log_y + UI_ROW_H + 6.0)
+	$UI/UpdateBtn.size = Vector2(sq * 2.0 + 6.0, UI_ROW_H)
+
+	log_label.position = Vector2(m, log_y)
+	log_label.size = Vector2(maxf(200.0, load_x - 8.0 - m), log_h)
+
+	# The toolbar spans the full width because the sidebar stops above it.
+	var right := [$UI/PauseBtn, $UI/Speed1Btn, $UI/Speed2Btn, $UI/Speed3Btn]
+	var right_w := 76.0 + 3.0 * 60.0 + 3.0 * 6.0
+	var left_tools := [
+		$UI/SelectBtn, $UI/TaxiwayBtn, $UI/RunwayBtn, $UI/StandBtn,
+		$UI/TerminalBtn, $UI/ConcourseBtn, $UI/RoadBtn, $UI/ParkingBtn,
+		$UI/DemolishBtn, $UI/LandBtn, $UI/HelpBtn,
+	]
+	var n := float(left_tools.size())
+	var avail: float = vp.x - 2.0 * m - right_w - 16.0
+	var bw: float = clampf((avail - (n - 1.0) * 6.0) / n, 52.0, 100.0)
+	# Button text does not shrink to fit and does not clip by default, so at
+	# narrow widths "Concourse" simply ran over "Road". Scale the type to the
+	# button and clip whatever still will not fit.
+	var fs: int = clampi(int(bw * 0.165), 11, 15)
+	var x := m
+	for b in left_tools:
+		var btn: Button = b
+		btn.position = Vector2(x, bar_y)
+		btn.size = Vector2(bw, UI_ROW_H)
+		btn.clip_text = true
+		btn.add_theme_font_size_override("font_size", fs)
+		x += bw + 6.0
+
+	# Laid out right to left from the window edge, so the speed controls stay
+	# pinned to the corner whatever the toolbar in front of them does.
+	var rx: float = vp.x - m
+	for i in range(right.size() - 1, -1, -1):
+		var b: Button = right[i]
+		var w: float = 76.0 if i == 0 else 60.0
+		rx -= w
+		b.position = Vector2(rx, bar_y)
+		b.size = Vector2(w, UI_ROW_H)
+		rx -= 6.0
+
+	# Tool readout right-aligned on the same line as the camera hint, so the
+	# bottom bar carries both without a row of its own for either.
+	tool_info_label.position = Vector2(m, info_y)
+	tool_info_label.size = Vector2(vp.x - 2.0 * m, 22.0)
+	if render3d != null:
+		render3d.set_hint_position(Vector2(m + 2.0, info_y + 3.0))
+
+
+func _layout_sidebar(side_x: float, side_w: float, fac_h: float, side_bottom: float) -> void:
+	var top := UI_TOP_H + 8.0
+	var fac: Panel = $UI/FacilityPanel
+	fac.position = Vector2(side_x, top)
+	fac.size = Vector2(side_w, fac_h)
+
+	var bw := 46.0
+	var sell_x: float = side_w - 12.0 - bw
+	var buy_x: float = sell_x - 6.0 - bw
+	var fac_title: Label = fac.get_node("Title")
+	fac_title.position = Vector2(12.0, 6.0)
+	fac_title.size = Vector2(side_w - 24.0, 22.0)
+	for i in 5:
+		var ry: float = 34.0 + UI_FAC_ROW_H * float(i)
+		var lbl: Label = fac.get_node("Row%dLabel" % i)
+		lbl.position = Vector2(12.0, ry)
+		lbl.size = Vector2(maxf(80.0, buy_x - 18.0), UI_FAC_ROW_H - 6.0)
+		var buy: Button = fac.get_node("Row%dBuy" % i)
+		buy.position = Vector2(buy_x, ry + 5.0)
+		buy.size = Vector2(bw, 28.0)
+		var sell: Button = fac.get_node("Row%dSell" % i)
+		sell.position = Vector2(sell_x, ry + 5.0)
+		sell.size = Vector2(bw, 28.0)
+
+	bank_panel.position = Vector2(side_x, top + fac_h + 6.0)
+	bank_panel.size = Vector2(side_w, UI_BANK_H)
+	bank_title.position = Vector2(12.0, 5.0)
+	bank_title.size = Vector2(side_w - 24.0, 20.0)
+	bank_label.position = Vector2(12.0, 27.0)
+	bank_label.size = Vector2(side_w - 24.0, 34.0)
+	var half: float = (side_w - 30.0) * 0.5
+	bank_borrow.position = Vector2(12.0, 66.0)
+	bank_borrow.size = Vector2(half, 28.0)
+	bank_repay.position = Vector2(18.0 + half, 66.0)
+	bank_repay.size = Vector2(half, 28.0)
+
+	var route_y: float = bank_panel.position.y + UI_BANK_H + 6.0
+	var route_h: float = maxf(UI_ROUTE_MIN, side_bottom - route_y)
+	var route: Panel = $UI/RoutePanel
+	route.position = Vector2(side_x, route_y)
+	route.size = Vector2(side_w, route_h)
+
+	var route_title: Label = route.get_node("Title")
+	route_title.position = Vector2(12.0, 6.0)
+	route_title.size = Vector2(side_w - 24.0, 22.0)
+	var offer_h: float = clampf(route_h * 0.36, 60.0, 132.0)
+	var offer: Label = route.get_node("OfferLabel")
+	offer.position = Vector2(12.0, 32.0)
+	offer.size = Vector2(side_w - 24.0, offer_h)
+	var btn_y: float = 32.0 + offer_h + 6.0
+	var bhalf: float = (side_w - 32.0) * 0.5
+	var accept: Button = route.get_node("AcceptBtn")
+	accept.position = Vector2(12.0, btn_y)
+	accept.size = Vector2(bhalf, 30.0)
+	var decline: Button = route.get_node("DeclineBtn")
+	decline.position = Vector2(20.0 + bhalf, btn_y)
+	decline.size = Vector2(bhalf, 30.0)
+	var active: Label = route.get_node("ActiveLabel")
+	active.position = Vector2(12.0, btn_y + 36.0)
+	active.size = Vector2(side_w - 24.0, maxf(20.0, route_h - btn_y - 44.0))
+	# Clipped, not merely sized: a squeezed window should show fewer route lines,
+	# never spill them out through the bottom of the panel and over the toolbar.
+	offer.clip_text = true
+	active.clip_text = true
+
+
+# A closure stops every movement on the field, which previously said so only as
+# one line in a scrolling log. It is the single most consequential thing the
+# weather does, so it gets a banner across the top of the view.
+func _build_closure_banner() -> void:
+	closure_banner = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.42, 0.10, 0.10, 0.93)
+	style.border_color = Color(1.0, 0.45, 0.35)
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.corner_radius_top_left = 5
+	style.corner_radius_top_right = 5
+	style.corner_radius_bottom_left = 5
+	style.corner_radius_bottom_right = 5
+	closure_banner.add_theme_stylebox_override("panel", style)
+	closure_banner.position = Vector2(150, 104)
+	closure_banner.size = Vector2(724, 48)
+	closure_banner.visible = false
+	$UI.add_child(closure_banner)
+
+	closure_label = Label.new()
+	closure_label.position = Vector2(0, 0)
+	closure_label.size = Vector2(724, 48)
+	closure_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	closure_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	closure_label.add_theme_font_size_override("font_size", 20)
+	closure_label.add_theme_color_override("font_color", Color(1, 0.92, 0.88))
+	closure_banner.add_child(closure_label)
+
+
+func _update_closure_banner() -> void:
+	var closed := wx_closed()
+	closure_banner.visible = closed
+	if not closed:
+		return
+	closure_label.text = "⛔  AIRPORT CLOSED — %s  ·  %s" % [
+		weather.get("name", "Weather"), weather.get("blurb", ""),
+	]
+	# Slow pulse on the border, so it stays noticeable without strobing.
+	var pulse: float = 0.55 + 0.45 * absf(sin(time_elapsed * 2.2))
+	var sb: StyleBoxFlat = closure_banner.get_theme_stylebox("panel")
+	sb.border_color = Color(1.0, 0.45, 0.35, pulse)
+
+
+# --- sandbox ---
+#
+# Testing a layout meant playing the economy first: reaching the point where a
+# second pier is affordable takes most of a session, so anything about how the
+# buildings fit together was gated behind money that has nothing to do with it.
+#
+# Cash is topped back up every frame rather than the costs being waived. Nothing
+# else then has to know about sandbox at all — _spend(), the affordability
+# guards, the pause ledger and the confirmation thresholds all run exactly as
+# they do in a real game, so sandbox play still exercises the same code.
+const SANDBOX_CASH := 900_000_000
+
+
+func _build_sandbox_toggle() -> void:
+	sandbox_btn = Button.new()
+	sandbox_btn.focus_mode = Control.FOCUS_NONE
+	sandbox_btn.position = Vector2(28.0, 374.0)
+	sandbox_btn.size = Vector2(544.0, 34.0)
+	sandbox_btn.pressed.connect(_toggle_sandbox)
+	_style_button(sandbox_btn)
+	$UI/StartPanel.add_child(sandbox_btn)
+	_refresh_sandbox_btn()
+
+
+func _toggle_sandbox() -> void:
+	sandbox = not sandbox
+	_refresh_sandbox_btn()
+
+
+func _refresh_sandbox_btn() -> void:
+	if sandbox_btn == null:
+		return
+	sandbox_btn.text = "SANDBOX MODE: ON — unlimited cash" if sandbox \
+		else "Sandbox mode: off — click for unlimited cash"
+
+
+# --- financing ---
+#
+# Built in code beside the other overlays rather than added to Main.tscn: it
+# sits between the two sidebar panels and its whole layout is computed by
+# _layout_ui() anyway, so a scene entry would only carry positions that get
+# overwritten on the first frame.
+
+func _build_bank_panel() -> void:
+	bank_panel = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.07, 0.09, 0.11, 0.92)
+	style.border_color = Color(0.35, 0.45, 0.4)
+	style.set_border_width_all(1)
+	bank_panel.add_theme_stylebox_override("panel", style)
+	$UI.add_child(bank_panel)
+
+	bank_title = Label.new()
+	bank_title.add_theme_font_size_override("font_size", 15)
+	bank_title.text = "BANK"
+	bank_panel.add_child(bank_title)
+
+	bank_label = Label.new()
+	bank_label.add_theme_font_size_override("font_size", 12)
+	bank_panel.add_child(bank_label)
+
+	bank_borrow = Button.new()
+	bank_borrow.focus_mode = Control.FOCUS_NONE
+	bank_borrow.text = "Borrow"
+	bank_borrow.pressed.connect(borrow.bind(LOAN_STEP))
+	_style_button(bank_borrow)
+	bank_panel.add_child(bank_borrow)
+
+	bank_repay = Button.new()
+	bank_repay.focus_mode = Control.FOCUS_NONE
+	bank_repay.text = "Repay"
+	bank_repay.pressed.connect(repay.bind(LOAN_STEP))
+	_style_button(bank_repay)
+	bank_panel.add_child(bank_repay)
+
+
+func credit_limit() -> int:
+	return LOAN_LIMIT_PER_REP * reputation
+
+
+func borrow_headroom() -> int:
+	return maxi(0, credit_limit() - loan_principal)
+
+
+func daily_interest() -> int:
+	return int(round(float(loan_principal) * LOAN_RATE_DAILY))
+
+
+# Drawing down is not a purchase, so it deliberately does not route through
+# _spend(): there is nothing to undo, and repayment is available at any time
+# whether or not the clock is running.
+func borrow(amount: int) -> void:
+	var take := mini(amount, borrow_headroom())
+	if take <= 0:
+		add_log("The bank won't extend more credit — reputation %d caps you at %s." % [
+			reputation, money_str(credit_limit()),
+		], "muted")
+		return
+	loan_principal += take
+	money += take
+	add_log("Borrowed %s. Debt %s, interest %s/day." % [
+		money_str(take), money_str(loan_principal), money_str(daily_interest()),
+	], "money")
+
+
+func repay(amount: int) -> void:
+	if loan_principal <= 0:
+		return
+	var pay := mini(mini(amount, loan_principal), money)
+	if pay <= 0:
+		add_log("No cash on hand to repay with.", "muted")
+		return
+	loan_principal -= pay
+	money -= pay
+	if loan_principal == 0:
+		add_log("Repaid %s — the airport is debt free." % money_str(pay), "money")
+	else:
+		add_log("Repaid %s. Debt now %s, interest %s/day." % [
+			money_str(pay), money_str(loan_principal), money_str(daily_interest()),
+		], "money")
+
+
+func _update_bank_ui() -> void:
+	if bank_label == null:
+		return
+	var headroom := borrow_headroom()
+	if loan_principal <= 0:
+		bank_label.text = "No debt · %.1f%% per day on what you draw\nCan borrow %s at reputation %d" % [
+			LOAN_RATE_DAILY * 100.0, money_str(credit_limit()), reputation,
+		]
+	else:
+		bank_label.text = "Debt %s · interest %s/day\n%s of %s still available" % [
+			money_str(loan_principal), money_str(daily_interest()),
+			money_str(headroom), money_str(credit_limit()),
+		]
+	bank_borrow.disabled = headroom <= 0
+	bank_repay.disabled = loan_principal <= 0 or money <= 0
+	bank_borrow.text = "Borrow %s" % money_str(mini(LOAN_STEP, maxi(headroom, 0)))
+	bank_repay.text = "Repay %s" % money_str(mini(LOAN_STEP, maxi(loan_principal, 0)))
+	var tip := "The bank lends %s per point of reputation. Interest is charged every day on the balance, before upkeep — being overdrawn at day end still costs reputation, so debt makes a bad run worse as well as a good run faster." % money_str(LOAN_LIMIT_PER_REP)
+	# Label defaults to MOUSE_FILTER_IGNORE, which swallows the tooltip entirely.
+	bank_label.mouse_filter = Control.MOUSE_FILTER_STOP
+	bank_label.tooltip_text = tip
+	bank_borrow.tooltip_text = tip
+	bank_repay.tooltip_text = tip
+
+
+# --- confirmation dialog ---
+#
+# Follows the existing modal precedent: a Panel in $UI plus an early return in
+# _unhandled_input. There is no input-blocking Control in this project and
+# GameOverPanel gets by the same way.
+
+func _build_confirm_dialog() -> void:
+	confirm_panel = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.1, 0.12, 0.98)
+	style.border_color = Color(0.88, 0.72, 0.33)
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	confirm_panel.add_theme_stylebox_override("panel", style)
+	confirm_panel.position = Vector2(300, 226)
+	confirm_panel.size = Vector2(560, 268)
+	confirm_panel.visible = false
+	$UI.add_child(confirm_panel)
+
+	confirm_label = Label.new()
+	confirm_label.position = Vector2(24, 20)
+	confirm_label.size = Vector2(512, 166)
+	confirm_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	confirm_label.add_theme_font_size_override("font_size", 15)
+	confirm_panel.add_child(confirm_label)
+
+	var yes := Button.new()
+	yes.position = Vector2(24, 210)
+	yes.size = Vector2(250, 36)
+	yes.focus_mode = Control.FOCUS_NONE
+	yes.text = "Confirm"
+	yes.pressed.connect(_on_confirm_yes)
+	_style_button(yes)
+	confirm_panel.add_child(yes)
+
+	var no := Button.new()
+	no.position = Vector2(286, 210)
+	no.size = Vector2(250, 36)
+	no.focus_mode = Control.FOCUS_NONE
+	no.text = "Cancel"
+	no.pressed.connect(_on_confirm_no)
+	_style_button(no)
+	confirm_panel.add_child(no)
+
+
+func _ask(body: String, on_confirm: Callable) -> void:
+	confirm_label.text = body
+	_confirm_action = on_confirm
+	confirm_pending = true
+	confirm_panel.visible = true
+
+
+func _on_confirm_yes() -> void:
+	var action := _confirm_action
+	_confirm_action = Callable()
+	confirm_pending = false
+	confirm_panel.visible = false
+	if action.is_valid():
+		action.call()
+
+
+func _on_confirm_no() -> void:
+	_confirm_action = Callable()
+	confirm_pending = false
+	confirm_panel.visible = false
+
+
+# --- save slots ---
+
+func _build_slot_panel() -> void:
+	slot_panel = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.1, 0.12, 0.98)
+	style.border_color = Color(0.55, 0.72, 0.66)
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	slot_panel.add_theme_stylebox_override("panel", style)
+	slot_panel.position = Vector2(260, 250)
+	slot_panel.size = Vector2(640, 322)
+	slot_panel.visible = false
+	$UI.add_child(slot_panel)
+
+	var title := Label.new()
+	title.position = Vector2(24, 16)
+	title.size = Vector2(592, 26)
+	title.add_theme_font_size_override("font_size", 18)
+	title.text = "SAVE SLOTS"
+	slot_panel.add_child(title)
+
+	for i in range(1, SAVE_SLOTS + 1):
+		var y := 34 + i * 58
+		var lbl := Label.new()
+		lbl.position = Vector2(24, y)
+		lbl.size = Vector2(370, 44)
+		lbl.add_theme_font_size_override("font_size", 13)
+		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		slot_panel.add_child(lbl)
+
+		var sb := Button.new()
+		sb.position = Vector2(402, y + 6)
+		sb.size = Vector2(100, 32)
+		sb.focus_mode = Control.FOCUS_NONE
+		sb.text = "Save"
+		sb.pressed.connect(_slot_save.bind(i))
+		_style_button(sb)
+		slot_panel.add_child(sb)
+
+		var lb := Button.new()
+		lb.position = Vector2(510, y + 6)
+		lb.size = Vector2(100, 32)
+		lb.focus_mode = Control.FOCUS_NONE
+		lb.text = "Load"
+		lb.pressed.connect(_slot_load.bind(i))
+		_style_button(lb)
+		slot_panel.add_child(lb)
+
+		slot_rows.append({"label": lbl, "load": lb})
+
+	var close := Button.new()
+	close.position = Vector2(24, 272)
+	close.size = Vector2(592, 34)
+	close.focus_mode = Control.FOCUS_NONE
+	close.text = "Close"
+	close.pressed.connect(_toggle_slots)
+	_style_button(close)
+	slot_panel.add_child(close)
+	_refresh_slot_rows()
+
+
+# Reads each slot's header without restoring it, so the picker can show what is
+# in there. Files are small, so this is cheap enough to do on every refresh.
+func _slot_summary(slot: int) -> String:
+	var path := save_path(slot)
+	if not FileAccess.file_exists(path):
+		return "Slot %d — empty" % slot
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return "Slot %d — unreadable" % slot
+	var d = f.get_var()
+	f.close()
+	if typeof(d) != TYPE_DICTIONARY:
+		return "Slot %d — unreadable" % slot
+	if d.get("version") != SAVE_VERSION:
+		return "Slot %d — older version, can't be loaded" % slot
+	return "Slot %d — Day %d · %s\n%s" % [
+		slot, int(d.get("day", 1)), money_str(int(d.get("money", 0))),
+		str(d.get("saved_at", "")),
+	]
+
+
+func _refresh_slot_rows() -> void:
+	if slot_rows.is_empty():
+		return
+	for i in slot_rows.size():
+		var slot := i + 1
+		var row: Dictionary = slot_rows[i]
+		(row["label"] as Label).text = _slot_summary(slot)
+		(row["load"] as Button).disabled = not FileAccess.file_exists(save_path(slot))
+
+
+func _toggle_slots() -> void:
+	slot_panel.visible = not slot_panel.visible
+	if slot_panel.visible:
+		_refresh_slot_rows()
+
+
+func _slot_save(slot: int) -> void:
+	save_game(slot)
+	_refresh_slot_rows()
+
+
+func _slot_load(slot: int) -> void:
+	load_game(slot)
+	slot_panel.visible = false
+
+
+# --- help overlay ---
+
+func _build_help_panel() -> void:
+	help_panel = Panel.new()
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.08, 0.1, 0.12, 0.98)
+	style.border_color = Color(0.55, 0.72, 0.66)
+	style.border_width_left = 2
+	style.border_width_top = 2
+	style.border_width_right = 2
+	style.border_width_bottom = 2
+	style.corner_radius_top_left = 6
+	style.corner_radius_top_right = 6
+	style.corner_radius_bottom_left = 6
+	style.corner_radius_bottom_right = 6
+	help_panel.add_theme_stylebox_override("panel", style)
+	help_panel.position = Vector2(150, 110)
+	help_panel.size = Vector2(724, 470)
+	help_panel.visible = false
+	$UI.add_child(help_panel)
+
+	var title := Label.new()
+	title.position = Vector2(24, 16)
+	title.size = Vector2(676, 26)
+	title.add_theme_font_size_override("font_size", 18)
+	title.text = "CONTROLS  —  F1 or Help to close"
+	help_panel.add_child(title)
+
+	var body := Label.new()
+	body.position = Vector2(24, 54)
+	body.size = Vector2(676, 356)
+	body.add_theme_font_size_override("font_size", 14)
+	body.text = _help_text()
+	help_panel.add_child(body)
+
+	var close := Button.new()
+	close.position = Vector2(24, 420)
+	close.size = Vector2(676, 34)
+	close.focus_mode = Control.FOCUS_NONE
+	close.text = "Close"
+	close.pressed.connect(_toggle_help)
+	_style_button(close)
+	help_panel.add_child(close)
+
+
+func _help_text() -> String:
+	# Camera lines come from Render3D's own hint string, so the two cannot drift
+	# apart as bindings change.
+	return "\n".join([
+		"BUILD          T taxiway · R runway · G stand (small) · H stand (wide)",
+		"               E concourse · O road · P car park · X demolish · L buy land",
+		"               Q rotate placement · Esc back to Select",
+		"",
+		"SIMULATION     Space pause/resume · 1 / 2 / 3 speed",
+		"               A sign the offer · D pass on it",
+		"",
+		"FINANCE        The bank lends against your reputation. Interest is charged",
+		"               every day on whatever is outstanding, before upkeep.",
+		"",
+		"SAVING         F5 save · F9 load",
+		"",
+		"CAMERA         " + _wrap_hint(Render3D.CAMERA_HINT),
+		"",
+		"PAUSING IS AN UNDO WINDOW",
+		"Anything bought while paused can be demolished or sold back for the full",
+		"amount. Resuming time locks it in — after that demolition refunds nothing",
+		"and costs " + money_str(COST_DEMOLISH_TILE) + " per tile.",
+	])
+
+
+# Three bindings per line. One per line made the camera block taller than the
+# rest of the sheet combined.
+func _wrap_hint(hint: String) -> String:
+	var parts := hint.split(" · ")
+	var lines := PackedStringArray()
+	var row := PackedStringArray()
+	for part in parts:
+		row.append(part)
+		if row.size() == 3:
+			lines.append(" · ".join(row))
+			row = PackedStringArray()
+	if row.size() > 0:
+		lines.append(" · ".join(row))
+	return "\n               ".join(lines)
+
+
+func _toggle_help() -> void:
+	help_panel.visible = not help_panel.visible
+
+
+# --- pause ledger ---
+
+# Every purchase routes through here so the ledger cannot drift out of step with
+# what was actually spent.
+func _spend(amount: int, kind: String, data: Dictionary) -> void:
+	money -= amount
+	if not paused:
+		return
+	var e := data.duplicate()
+	e["kind"] = kind
+	e["cost"] = amount
+	pause_ledger.append(e)
+
+
+func pause_spend_total() -> int:
+	var t := 0
+	for e in pause_ledger:
+		t += int(e["cost"])
+	return t
+
+
+# Finds an unlocked purchase covering any of these cells and removes it,
+# returning what it cost — or -1 if these tiles were locked in by resuming.
+func _ledger_take_cells(cells: Array) -> int:
+	for i in pause_ledger.size():
+		var e: Dictionary = pause_ledger[i]
+		if e["kind"] != "tile":
+			continue
+		for c in cells:
+			if c in e["cells"]:
+				pause_ledger.remove_at(i)
+				return int(e["cost"])
+	return -1
+
+
+func _do_place_terminal(cells: Array, rot: int) -> void:
+	if money < COST_TERMINAL or not grid.can_place_terminal(cells):
+		return
+	_spend(COST_TERMINAL, "tile", {"cells": cells.duplicate()})
+	var id := grid.place_terminal(cells, rot)
+	add_log("Built Terminal %d for %s — passenger capacity now %d." % [
+		id + 1, money_str(COST_TERMINAL), capacity("term"),
+	], "build")
+	var t = grid.get_terminal(id)
+	if t != null and not grid.terminal_is_roaded(t):
+		add_log("That terminal has no road access — it handles no passengers.", "warning")
+	render3d.mark_layout_dirty()
+
+
+func _do_buy_tract(tract: int) -> void:
+	var land_cost := grid.tract_tiles(tract) * COST_LAND_TILE
+	if money < land_cost:
+		return
+	_spend(land_cost, "land", {"tract": tract})
+	grid.buy_tract(tract)
+	var tr: Rect2i = AirportGrid.TRACTS[tract]
+	add_log("Bought %d x %d tract for %s — %d tiles of new land." % [
+		tr.size.x, tr.size.y, money_str(land_cost), grid.tract_tiles(tract),
+	], "build")
+	render3d.mark_layout_dirty()
+
+
+# Clicking owned land with the Buy Land tool releases it, but only if it was
+# bought during the current pause and nothing has been built on it since.
+func _try_release_tract(cell: Vector2i) -> void:
+	var owned: int = grid.owned_tract_at(cell)
+	if owned < 0:
+		add_log("That land is already yours.", "muted")
+		return
+	var undo := _ledger_take("land", "tract", owned)
+	if undo < 0:
+		add_log("That tract was locked in when time resumed — it can't be sold back.", "muted")
+		return
+	if not grid.tract_is_bare(owned):
+		# Put the entry back: refusing must not silently forfeit the refund.
+		pause_ledger.append({"kind": "land", "tract": owned, "cost": undo})
+		add_log("Clear everything built on that tract before releasing it.", "muted")
+		return
+	grid.sell_tract(owned)
+	money += undo
+	add_log("Released that tract — %s refunded in full." % money_str(undo), "build")
+	render3d.mark_layout_dirty()
+
+
+func _confirm_demolish(cell: Vector2i, preview: Dictionary, fee: int) -> void:
+	_ask(
+		"Demolish %d tile(s)?\n\nThis was locked in when time resumed, so nothing is refunded. Clearing it costs %s."
+			% [preview["tiles"], money_str(fee)],
+		func() -> void:
+			# Re-check: the dialog is modal to input, but a stand can become
+			# occupied while it is open.
+			var now := grid.demolish_preview(cell)
+			if now.is_empty():
+				add_log("Can't demolish that — it's in use or empty.", "muted")
+				return
+			var due := COST_DEMOLISH_TILE * int(now["tiles"])
+			if money < due:
+				add_log("Not enough cash to demolish that (%s)." % money_str(due), "muted")
+				return
+			grid.demolish(cell)
+			money -= due
+			add_log("Demolished %d tile(s) — cost %s." % [now["tiles"], money_str(due)], "money")
+			render3d.mark_layout_dirty())
+
+
+func _ledger_take(kind: String, field: String, value) -> int:
+	for i in pause_ledger.size():
+		var e: Dictionary = pause_ledger[i]
+		if e["kind"] == kind and e[field] == value:
+			pause_ledger.remove_at(i)
+			return int(e["cost"])
+	return -1
 
 
 func _check_for_update() -> void:
@@ -354,6 +1334,9 @@ func _choose_setup(i: int) -> void:
 			return
 		region = regions[i]
 		setup_stage = 2
+		# Terrain is purely cosmetic, but it can only be applied now: the
+		# renderer is built in _ready, well before a region exists.
+		render3d.set_terrain(Regions.TERRAIN[region["terrain"]])
 		_show_setup()
 		add_log("Airport sited in %s, %s." % [region["name"], continent_name])
 		var kinds := []
@@ -381,8 +1364,37 @@ func _style_button(b: Button) -> void:
 
 
 func _on_pause_toggled(on: bool) -> void:
+	if _pause_guard:
+		return
+	# Resuming with unlocked purchases is the commit point: refunds stop being
+	# available the moment the clock starts again, so it has to be deliberate.
+	if not on and not pause_ledger.is_empty():
+		_set_pause_button(true)
+		_ask(
+			"Resume time?\n\nYou have committed %s of construction during this pause.\n\nResuming locks it in. After this, demolition no longer refunds anything — it costs %s per tile."
+				% [money_str(pause_spend_total()), money_str(COST_DEMOLISH_TILE)],
+			_confirm_resume)
+		return
+	_apply_pause(on)
+
+
+func _apply_pause(on: bool) -> void:
 	paused = on
 	$UI/PauseBtn.text = "Resume" if on else "Pause"
+
+
+# Set the toggle without re-entering _on_pause_toggled.
+func _set_pause_button(pressed: bool) -> void:
+	_pause_guard = true
+	$UI/PauseBtn.button_pressed = pressed
+	_pause_guard = false
+
+
+func _confirm_resume() -> void:
+	add_log("Locked in %s of construction." % money_str(pause_spend_total()), "build")
+	pause_ledger.clear()
+	_set_pause_button(false)
+	_apply_pause(false)
 
 
 func _set_speed(s: float) -> void:
@@ -415,13 +1427,38 @@ func _set_tool(t: Tool) -> void:
 		selected_plane_id = -1
 
 
-func add_log(msg: String) -> void:
-	log_lines.push_front("[%.1fs] %s" % [time_elapsed, msg])
+const LOG_COLORS := {
+	"critical": "#ff6f61",
+	"emergency": "#ff5ea8",
+	"warning": "#ffc65e",
+	"money": "#7fd6a0",
+	"build": "#8fc7ff",
+	"muted": "#8a949a",
+}
+
+
+## `severity` keys into LOG_COLORS; anything else renders in the default colour.
+func add_log(msg: String, severity: String = "") -> void:
+	# Plain text and severity are kept apart on purpose. `--echo-log` mirrors the
+	# plain line to stdout and CLAUDE.md's balance-run verification greps that
+	# output, so storing markup here would corrupt the documented check.
+	log_lines.push_front({"text": "[%.1fs] %s" % [time_elapsed, msg], "sev": severity})
 	if log_lines.size() > 40:
 		log_lines.resize(40)
-	log_label.text = "\n".join(log_lines)
+
+	var parts := PackedStringArray()
+	for e in log_lines:
+		# The timestamp's own brackets would otherwise parse as a bbcode tag.
+		var t: String = (e["text"] as String).replace("[", "[lb]")
+		var s: String = e["sev"]
+		if LOG_COLORS.has(s):
+			parts.append("[color=%s]%s[/color]" % [LOG_COLORS[s], t])
+		else:
+			parts.append(t)
+	log_label.text = "\n".join(parts)
+
 	if _echo_log:
-		print(log_lines[0])
+		print(log_lines[0]["text"])
 
 
 func find_plane(id: int) -> Variant:
@@ -462,11 +1499,13 @@ func fac_def(key: String) -> Dictionary:
 
 func capacity(key: String) -> int:
 	if key == "term":
-		# Only concourse and parking that a road actually reaches can handle
-		# passengers, so landside access is a real constraint.
-		var conc := grid.count_tiles(AirportGrid.TileType.TERMINAL, true)
+		# The HALL processes passengers, and only one a road actually reaches, so
+		# landside access is a real constraint. Concourse piers add no capacity of
+		# their own — what they add is jet bridges, by being what a stand can
+		# touch.
+		var hall := grid.terminal_tile_count(true)
 		var park := grid.count_tiles(AirportGrid.TileType.PARKING, true)
-		return conc * TERM_UNITS_PER_TILE + park * PARK_UNITS_PER_TILE
+		return hall * TERM_UNITS_PER_TILE + park * PARK_UNITS_PER_TILE
 	return facilities.get(key, 0) * int(fac_def(key)["per_unit"])
 
 
@@ -479,21 +1518,34 @@ func total_upkeep() -> int:
 	for f in FACILITIES:
 		total += int(facilities.get(f["key"], 0)) * int(f["upkeep"])
 	total += grid.runways.size() * UPKEEP_RUNWAY
-	total += grid.terminal_tile_count() * UPKEEP_TERMINAL_TILE
+	total += grid.terminals.size() * UPKEEP_TERMINAL
+	total += grid.concourses.size() * UPKEEP_CONCOURSE
 	total += grid.count_tiles(AirportGrid.TileType.ROAD, false) * UPKEEP_ROAD_TILE
 	total += grid.count_tiles(AirportGrid.TileType.PARKING, false) * UPKEEP_PARKING_TILE
-	total += grid.gates.size() * UPKEEP_STAND
+	total += grid.stands.size() * UPKEEP_STAND
 	return total
 
 
 func buy_facility(key: String) -> void:
 	var d := fac_def(key)
 	if money < int(d["cost"]):
-		add_log("Not enough cash for a %s (%s)." % [d["name"].to_lower(), money_str(d["cost"])])
+		add_log("Not enough cash for a %s (%s)." % [d["name"].to_lower(), money_str(d["cost"])], "muted")
 		return
-	money -= int(d["cost"])
+	if int(d["cost"]) >= CONFIRM_THRESHOLD and not paused:
+		_ask("Commission a %s for %s?\n\nUpkeep rises to %s per day." % [
+			d["name"], money_str(d["cost"]), money_str(total_upkeep() + int(d["upkeep"])),
+		], _do_buy_facility.bind(key))
+		return
+	_do_buy_facility(key)
+
+
+func _do_buy_facility(key: String) -> void:
+	var d := fac_def(key)
+	if money < int(d["cost"]):
+		return
+	_spend(int(d["cost"]), "facility", {"key": key})
 	facilities[key] = int(facilities.get(key, 0)) + 1
-	add_log("Commissioned %s. Upkeep now %s/day." % [d["name"], money_str(total_upkeep())])
+	add_log("Commissioned %s. Upkeep now %s/day." % [d["name"], money_str(total_upkeep())], "build")
 
 
 func sell_facility(key: String) -> void:
@@ -502,12 +1554,41 @@ func sell_facility(key: String) -> void:
 		return
 	# Never sell capacity that aircraft are currently occupying.
 	if capacity(key) - int(d["per_unit"]) < int(used.get(key, 0)):
-		add_log("That %s is in use right now." % d["name"].to_lower())
+		add_log("That %s is in use right now." % d["name"].to_lower(), "muted")
+		return
+	# Bought during this same pause: undo it outright rather than taking the
+	# resale haircut. No confirmation, because an undo costs nothing.
+	var undo := _ledger_take("facility", "key", key)
+	if undo >= 0:
+		facilities[key] -= 1
+		money += undo
+		add_log("Undid %s — %s refunded in full." % [d["name"], money_str(undo)], "build")
+		return
+
+	var refund := int(int(d["cost"]) * REFUND_RATE)
+	# Selling at a loss is as unrecoverable as buying, and the sell button sits
+	# one pixel from the buy button.
+	if int(d["cost"]) >= CONFIRM_THRESHOLD:
+		_ask("Decommission a %s?\n\nIt cost %s and recovers only %s." % [
+			d["name"], money_str(d["cost"]), money_str(refund),
+		], _do_sell_facility.bind(key))
+		return
+	_do_sell_facility(key)
+
+
+func _do_sell_facility(key: String) -> void:
+	var d := fac_def(key)
+	if int(facilities.get(key, 0)) <= 0:
+		return
+	# Re-checked: the dialog is modal to input, but capacity can be taken while
+	# it is open.
+	if capacity(key) - int(d["per_unit"]) < int(used.get(key, 0)):
+		add_log("That %s is in use right now." % d["name"].to_lower(), "muted")
 		return
 	facilities[key] -= 1
 	var refund := int(int(d["cost"]) * REFUND_RATE)
 	money += refund
-	add_log("Decommissioned %s, recovered %s." % [d["name"], money_str(refund)])
+	add_log("Decommissioned %s, recovered %s." % [d["name"], money_str(refund)], "money")
 
 
 # Turnarounds need a crew, a fuel truck, and terminal capacity scaled by how many
@@ -531,7 +1612,7 @@ func try_start_service(p: Dictionary) -> bool:
 func service_shortfall(p: Dictionary) -> String:
 	var need_term: int = class_of(p)["term_units"]
 	if free_capacity("term") < need_term:
-		if grid.count_tiles(AirportGrid.TileType.TERMINAL, true) == 0:
+		if grid.count_tiles(AirportGrid.TileType.CONCOURSE, true) == 0:
 			return "no concourse with road access"
 		return "passenger capacity full"
 	if free_capacity("crew") < 1:
@@ -606,15 +1687,30 @@ func update_weather() -> void:
 
 func end_of_day() -> void:
 	var bill := total_upkeep()
-	money -= bill
+	var interest := daily_interest()
+	money -= bill + interest
 	last_upkeep = bill
+	last_interest = interest
 	last_day_revenue = day_revenue
 	day_revenue = 0
-	add_log("Day %d closed — took %s, upkeep %s." % [day, money_str(last_day_revenue), money_str(bill)])
+	if interest > 0:
+		add_log("Day %d closed — took %s, upkeep %s, interest %s on %s of debt." % [
+			day, money_str(last_day_revenue), money_str(bill),
+			money_str(interest), money_str(loan_principal),
+		], "money")
+	else:
+		add_log("Day %d closed — took %s, upkeep %s." % [day, money_str(last_day_revenue), money_str(bill)], "money")
 	day += 1
 	if money < 0:
 		reputation = max(0, reputation - 12)
-		add_log("OVERDRAWN — couldn't cover upkeep. Reputation -12.")
+		add_log("OVERDRAWN — couldn't cover the day's bills. Reputation -12.", "critical")
+		# Reputation is the credit limit, so an overdrawn day narrows the room to
+		# borrow out of it. That is the intended shape of the debt failure path:
+		# it tightens rather than ending the game outright.
+		if loan_principal > credit_limit():
+			add_log("Debt of %s now exceeds your %s credit limit." % [
+				money_str(loan_principal), money_str(credit_limit()),
+			], "warning")
 
 
 # --- airline relationships ---
@@ -634,8 +1730,8 @@ func can_handle_class(size: int) -> bool:
 			break
 	if not runway_ok:
 		return false
-	for g in grid.gates:
-		if grid.gate_is_connected(g) and g["size"] >= int(need["gate_size"]):
+	for g in grid.stands:
+		if grid.stand_is_connected(g):
 			return true
 	return false
 
@@ -768,7 +1864,7 @@ func accept_offer() -> void:
 			if hub_airline != "":
 				# Only one hub carrier at a time, and walking away from one is costly.
 				reputation = max(0, reputation - HUB_BREAK_REP)
-				add_log("Broke the %s hub agreement. Reputation -%d." % [hub_airline, HUB_BREAK_REP])
+				add_log("Broke the %s hub agreement. Reputation -%d." % [hub_airline, HUB_BREAK_REP], "critical")
 				routes = routes.filter(func(r): return not r.get("hub", false))
 			hub_airline = offer["airline"]
 			for o in offer["origins"]:
@@ -839,7 +1935,7 @@ func process_scheduled_arrivals() -> void:
 			diverted += 1
 			add_log("%s %s from %s TURNED AWAY — no capacity. Reputation -%d." % [
 				a["airline"], CLASSES[a["size"]]["name"], a["origin"][0], REP_TURNED_AWAY,
-			])
+			], "critical")
 
 
 func spawn_flight(airline: String, size: int, origin: Array, rate: float, kind: String) -> void:
@@ -853,7 +1949,7 @@ func spawn_flight(airline: String, size: int, origin: Array, rate: float, kind: 
 		"state": "AIR_HOLD",
 		"pos": SPAWN_POS, "heading": 0.0,
 		"cell": AirportGrid.NOWHERE,
-		"runway_id": -1, "gate_id": -1,
+		"runway_id": -1, "stand_id": -1,
 		"path": [], "path_index": 0,
 		"air_hold_timer": 0.0, "max_air_hold": 25.0,
 		"hold_timer": 0.0, "max_hold": 18.0,
@@ -873,7 +1969,7 @@ func spawn_flight(airline: String, size: int, origin: Array, rate: float, kind: 
 		planes[-1]["max_hold"] = 32.0
 		add_log("EMERGENCY — %s diverted to us from %s (%s). Needs priority." % [
 			callsign, origin[1], cls["name"],
-		])
+		], "emergency")
 	else:
 		add_log("%s inbound from %s — %s, fee %s." % [
 			callsign, origin[0], cls["name"], money_str(payout),
@@ -956,6 +2052,58 @@ func move_toward_point(p: Dictionary, target: Vector2, speed: float, dt: float) 
 	return false
 
 
+# How fast a parked aircraft swings onto its stand heading, and creeps onto the
+# marks. Both are settled well inside the shortest turnaround, but slowly enough
+# to read as manoeuvring rather than snapping.
+const PARK_TURN_RATE := 2.2
+const PARK_CREEP_SPEED := 16.0
+# Slower than taxiing, because a real pushback is a tug walking it back.
+const PUSHBACK_SPEED := 11.0
+
+
+# Parking is the one moment the aircraft's own motion gets it wrong twice over.
+#
+# Heading is otherwise only ever "the way I was last moving", so a stand entered
+# from the side left the aircraft pointing straight along the row — parked
+# broadside to its own jet bridge. And the taxi route ends at the stand's *park
+# cell*, which on a two-tile widebody stand is one half of it, so a widebody sat
+# on one tile with the other empty beside it.
+#
+# Both are eased rather than assigned: a snap the instant the wheels stop is as
+# conspicuous as the wrong pose was, and this is the one place in the game where
+# an aircraft sits still long enough for anyone to watch it move.
+#
+# `pos` moves but `cell` deliberately does not. Nothing derives `cell` from
+# position — it is only ever assigned as a route advances — so the claim, the
+# blocking checks and the departure route all still run off the park cell while
+# the aircraft straddles both tiles.
+func _settle_at_stand(p: Dictionary, dt: float) -> void:
+	var stand = grid.get_stand(p["stand_id"])
+	if stand == null:
+		return
+
+	# Drive onto the marks, do not slide onto them. The first version moved `pos`
+	# while easing `heading` separately, so the aircraft crabbed sideways across
+	# the stand — it was translating in one direction while pointing in another.
+	# move_toward_point() sets heading from the direction of travel, exactly as
+	# every other taxi leg does, so the nose leads the way in.
+	var want: Vector2 = grid.stand_park_point(stand)
+	if not move_toward_point(p, want, PARK_CREEP_SPEED, dt):
+		return
+
+	# On the marks: now swing to the stand's own heading. This is the only part
+	# that should ever rotate without translating, and it is what a real
+	# aircraft's final turn onto the stand looks like.
+	var target: float = grid.stand_park_heading(stand)
+	if is_nan(target):
+		return
+	# wrapf to (-PI, PI] picks the short way round; without it an aircraft
+	# needing -170 degrees would take the 190-degree route.
+	var diff: float = wrapf(target - float(p["heading"]), -PI, PI)
+	var step := PARK_TURN_RATE * dt
+	p["heading"] = float(p["heading"]) + clampf(diff, -step, step)
+
+
 func set_path(p: Dictionary, path: Array) -> void:
 	p["path"] = path
 	p["path_index"] = 1 if not path.is_empty() and path[0] == p["cell"] else 0
@@ -990,7 +2138,7 @@ func advance_along_path(p: Dictionary, speed: float, dt: float) -> String:
 
 
 func taxi_priority(p: Dictionary) -> int:
-	return 1 if p["state"] == "TAXI_TO_GATE" else 0
+	return 1 if p["state"] == "TAXI_TO_STAND" else 0
 
 
 func yields_to(p: Dictionary, other: Dictionary) -> bool:
@@ -1029,11 +2177,11 @@ func handle_blocked(p: Dictionary, dt: float) -> bool:
 
 func release_plane(p: Dictionary) -> void:
 	grid.release_all(p["id"])
-	if p["gate_id"] != -1:
-		var g = grid.get_gate(p["gate_id"])
+	if p["stand_id"] != -1:
+		var g = grid.get_stand(p["stand_id"])
 		if g != null:
 			g["occupied"] = false
-		p["gate_id"] = -1
+		p["stand_id"] = -1
 	if p["runway_id"] != -1:
 		var r = grid.get_runway(p["runway_id"])
 		if r != null:
@@ -1052,11 +2200,11 @@ func divert(p: Dictionary, reason: String, rep_cost: int) -> void:
 		cost = maxi(1, rep_cost / 2)
 	reputation = max(0, reputation - cost)
 	diverted += 1
-	add_log("%s DIVERTED — %s. Reputation -%d." % [p["callsign"], reason, rep_cost])
+	add_log("%s DIVERTED — %s. Reputation -%d." % [p["callsign"], reason, rep_cost], "critical")
 	release_plane(p)
 
 
-# --- gate / runway acquisition ---
+# --- stand / runway acquisition ---
 
 func class_of(p: Dictionary) -> Dictionary:
 	return CLASSES[p["size"]]
@@ -1066,8 +2214,11 @@ func runway_fits(r: Dictionary, p: Dictionary) -> bool:
 	return grid.runway_length_tiles(r) >= required_runway(p)
 
 
-func gate_fits(g: Dictionary, p: Dictionary) -> bool:
-	return g["size"] >= class_of(p)["gate_size"]
+# Every stand takes every aircraft now, so the only question a stand answers is
+# whether it is connected. Kept as a named predicate rather than inlined: the
+# callers read as intent, and a size rule could come back.
+func stand_fits(_g: Dictionary, _p: Dictionary) -> bool:
+	return true
 
 
 func any_runway_fits(p: Dictionary) -> bool:
@@ -1077,57 +2228,57 @@ func any_runway_fits(p: Dictionary) -> bool:
 	return false
 
 
-func any_gate_fits(p: Dictionary) -> bool:
-	for g in grid.gates:
-		if grid.gate_is_connected(g) and gate_fits(g, p):
+func any_stand_fits(p: Dictionary) -> bool:
+	for g in grid.stands:
+		if grid.stand_is_connected(g) and stand_fits(g, p):
 			return true
 	return false
 
 
-func compatible_free_gates(p: Dictionary) -> Array:
+func compatible_free_stands(p: Dictionary) -> Array:
 	var out := []
-	for g in grid.usable_free_gates():
-		if gate_fits(g, p):
+	for g in grid.usable_free_stands():
+		if stand_fits(g, p):
 			out.append(g)
 	return out
 
 
-func try_assign_gate(p: Dictionary) -> bool:
+func try_assign_stand(p: Dictionary) -> bool:
 	var best_path: Array = []
-	var best_gate = null
-	for g in compatible_free_gates(p):
-		var path := grid.find_path(p["cell"], grid.gate_park_cell(g))
+	var best_stand = null
+	for g in compatible_free_stands(p):
+		var path := grid.find_path(p["cell"], grid.stand_park_cell(g))
 		if path.is_empty():
 			continue
 		if best_path.is_empty() or path.size() < best_path.size():
 			best_path = path
-			best_gate = g
-	if best_gate == null:
+			best_stand = g
+	if best_stand == null:
 		return false
 
-	best_gate["occupied"] = true
-	p["gate_id"] = best_gate["id"]
+	best_stand["occupied"] = true
+	p["stand_id"] = best_stand["id"]
 	set_path(p, best_path)
-	p["state"] = "TAXI_TO_GATE"
+	p["state"] = "TAXI_TO_STAND"
 	p["state_timer"] = 0.0
-	add_log("%s cleared to Gate %d." % [p["callsign"], best_gate["id"] + 1])
+	add_log("%s cleared to Stand %d." % [p["callsign"], best_stand["id"] + 1])
 	return true
 
 
-func assign_gate_manual(p: Dictionary, gate: Dictionary) -> void:
-	if not gate_fits(gate, p):
-		add_log("Gate %d is too small for a %s." % [gate["id"] + 1, class_of(p)["name"].to_lower()])
+func assign_stand_manual(p: Dictionary, stand: Dictionary) -> void:
+	if not stand_fits(stand, p):
+		add_log("Stand %d is too small for a %s." % [stand["id"] + 1, class_of(p)["name"].to_lower()])
 		return
-	var path := grid.find_path(p["cell"], grid.gate_park_cell(gate))
+	var path := grid.find_path(p["cell"], grid.stand_park_cell(stand))
 	if path.is_empty():
-		add_log("No taxi route from %s to Gate %d." % [p["callsign"], gate["id"] + 1])
+		add_log("No taxi route from %s to Stand %d." % [p["callsign"], stand["id"] + 1])
 		return
-	gate["occupied"] = true
-	p["gate_id"] = gate["id"]
+	stand["occupied"] = true
+	p["stand_id"] = stand["id"]
 	set_path(p, path)
-	p["state"] = "TAXI_TO_GATE"
+	p["state"] = "TAXI_TO_STAND"
 	p["state_timer"] = 0.0
-	add_log("%s assigned to Gate %d." % [p["callsign"], gate["id"] + 1])
+	add_log("%s assigned to Stand %d." % [p["callsign"], stand["id"] + 1])
 
 
 func runway_has_waiting_departure(runway_id: int) -> bool:
@@ -1178,7 +2329,7 @@ func find_departure_runway(p: Dictionary) -> Dictionary:
 func tow(p: Dictionary, reason: String) -> void:
 	money = max(0, money - TOW_FEE)
 	reputation = max(0, reputation - 5)
-	add_log("%s %s — towed off. -%s, Reputation -5." % [p["callsign"], reason, money_str(TOW_FEE)])
+	add_log("%s %s — towed off. -%s, Reputation -5." % [p["callsign"], reason, money_str(TOW_FEE)], "critical")
 	release_plane(p)
 
 
@@ -1199,7 +2350,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			var runway = find_arrival_runway(p)
 			# Never clear a landing we can't park — a plane that has already
 			# touched down has nowhere to go, so the stand check belongs here.
-			if runway != null and any_gate_fits(p):
+			if runway != null and any_stand_fits(p):
 				runway["occupied"] = true
 				p["runway_id"] = runway["id"]
 				p["state"] = "APPROACH"
@@ -1212,7 +2363,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 					reason = "no runway long enough for a %s (needs %s)" % [
 						class_of(p)["name"].to_lower(), length_str(class_of(p)["min_runway"]),
 					]
-				elif not any_gate_fits(p):
+				elif not any_stand_fits(p):
 					reason = "no stand big enough for a %s" % class_of(p)["name"].to_lower()
 				divert(p, reason, 15)
 
@@ -1255,31 +2406,31 @@ func update_plane(p: Dictionary, dt: float) -> void:
 					runway["occupied"] = false
 					p["runway_id"] = -1
 					p["blocked_timer"] = 0.0
-					p["state"] = "SEEK_GATE"
+					p["state"] = "SEEK_STAND"
 					p["state_timer"] = 0.0
 				else:
 					p["blocked_timer"] += dt
 					if p["blocked_timer"] >= MAX_BLOCK_TIME:
 						divert(p, "runway exit blocked", 15)
 
-		"SEEK_GATE":
-			if try_assign_gate(p):
+		"SEEK_STAND":
+			if try_assign_stand(p):
 				return
-			if not any_gate_fits(p):
+			if not any_stand_fits(p):
 				# Only reachable if the last compatible stand was demolished
 				# mid-approach; AIR_HOLD screens this case before clearing.
 				divert(p, "its stand was removed on approach", 10)
-			elif compatible_free_gates(p).is_empty():
+			elif compatible_free_stands(p).is_empty():
 				p["state"] = "HOLDING"
 				p["hold_timer"] = 0.0
 				set_path(p, [])
-				add_log("%s holding — no free stand." % p["callsign"])
+				add_log("%s holding — no free stand." % p["callsign"], "warning")
 			else:
 				divert(p, "no taxi route to any stand", 10)
 
 		"HOLDING":
 			p["hold_timer"] += dt
-			if try_assign_gate(p):
+			if try_assign_stand(p):
 				return
 			if p["path_index"] < p["path"].size():
 				advance_along_path(p, taxi_speed(), dt)
@@ -1290,9 +2441,9 @@ func update_plane(p: Dictionary, dt: float) -> void:
 					if path.size() > 1:
 						set_path(p, path)
 			if p["hold_timer"] >= p["max_hold"]:
-				divert(p, "too long without a gate", 10)
+				divert(p, "too long without a stand", 10)
 
-		"TAXI_TO_GATE":
+		"TAXI_TO_STAND":
 			match advance_along_path(p, taxi_speed(), dt):
 				"arrived":
 					p["state"] = "AWAIT_SERVICE"
@@ -1302,11 +2453,11 @@ func update_plane(p: Dictionary, dt: float) -> void:
 					if handle_blocked(p, dt):
 						divert(p, "gridlocked on the taxiway", 10)
 				"lost":
-					var gate = grid.get_gate(p["gate_id"])
-					if gate == null:
-						divert(p, "gate demolished en route", 10)
+					var stand = grid.get_stand(p["stand_id"])
+					if stand == null:
+						divert(p, "stand demolished en route", 10)
 					else:
-						var path := grid.find_path(p["cell"], grid.gate_park_cell(gate))
+						var path := grid.find_path(p["cell"], grid.stand_park_cell(stand))
 						if path.size() > 1:
 							set_path(p, path)
 						else:
@@ -1314,25 +2465,27 @@ func update_plane(p: Dictionary, dt: float) -> void:
 
 		# Parked, but the turnaround cannot begin until ground support frees up.
 		"AWAIT_SERVICE":
+			_settle_at_stand(p, dt)
 			p["service_wait"] += dt
 			if try_start_service(p):
-				p["state"] = "AT_GATE"
+				p["state"] = "AT_STAND"
 				p["state_timer"] = 0.0
 				var extra := " (line check)" if p["holds"].has("mech") else ""
-				var gate = grid.get_gate(p["gate_id"])
+				var stand = grid.get_stand(p["stand_id"])
 				# No jet bridge means bussing every passenger, which takes longer.
-				if gate != null and not grid.gate_is_contact(gate):
+				if stand != null and not grid.stand_is_contact(stand):
 					p["turnaround"] *= REMOTE_STAND_FACTOR
 					extra += " (remote stand)"
-				add_log("%s at Gate %d, turning around%s." % [p["callsign"], p["gate_id"] + 1, extra])
+				add_log("%s at Stand %d, turning around%s." % [p["callsign"], p["stand_id"] + 1, extra])
 			elif p["service_wait"] >= SERVICE_PATIENCE and not p["delay_logged"]:
 				p["delay_logged"] = true
 				reputation = max(0, reputation - 4)
-				add_log("%s stuck at Gate %d — %s. Reputation -4." % [
-					p["callsign"], p["gate_id"] + 1, service_shortfall(p),
-				])
+				add_log("%s stuck at Stand %d — %s. Reputation -4." % [
+					p["callsign"], p["stand_id"] + 1, service_shortfall(p),
+				], "critical")
 
-		"AT_GATE":
+		"AT_STAND":
+			_settle_at_stand(p, dt)
 			if p["state_timer"] >= p["turnaround"]:
 				var take: int = p["payout"]
 				if p["holds"].has("mech"):
@@ -1344,9 +2497,9 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				var rep_gain := REP_PER_TURNAROUND
 				if p.get("emergency", false):
 					rep_gain = REP_EMERGENCY_HANDLED
-					add_log("%s emergency handled. Reputation +%d." % [p["callsign"], rep_gain])
+					add_log("%s emergency handled. Reputation +%d." % [p["callsign"], rep_gain], "emergency")
 				reputation = min(REP_MAX, reputation + rep_gain)
-				add_log("%s turnaround complete. +%s" % [p["callsign"], money_str(take)])
+				add_log("%s turnaround complete. +%s" % [p["callsign"], money_str(take)], "money")
 				release_service(p)
 				p["state"] = "AWAIT_DEPART"
 				p["state_timer"] = 0.0
@@ -1358,13 +2511,35 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			p["runway_id"] = departure["runway"]["id"]
 			p["dep_from_b"] = departure["from_b"]
 			set_path(p, departure["path"])
-			# Gate frees at pushback, not at the runway — keeps throughput sane.
-			var gate = grid.get_gate(p["gate_id"])
-			if gate != null:
-				gate["occupied"] = false
-			p["gate_id"] = -1
-			p["state"] = "TAXI_OUT"
+			# Stand frees at pushback, not at the runway — keeps throughput sane.
+			var stand = grid.get_stand(p["stand_id"])
+			if stand != null:
+				stand["occupied"] = false
+			p["stand_id"] = -1
+			# Off the marks tail-first before taxiing. An aircraft parked nose-in
+			# cannot drive forward out of a stand — it is pointing at the pier —
+			# so it reverses STRAIGHT back, one tile, along its own heading. Not
+			# toward the park cell: that is off to one side, and backing toward it
+			# is the sideways slide this was meant to remove.
+			var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
+			p["push_to"] = p["pos"] - fwd * AirportGrid.TILE
+			p["state"] = "PUSHBACK"
 			p["state_timer"] = 0.0
+
+		# Reversing off the stand: translate WITHOUT turning, so the tail leads
+		# and the nose stays on the pier right up until the aircraft is clear.
+		# Every other movement in the game sets heading from the direction of
+		# travel, which is exactly what must not happen here.
+		"PUSHBACK":
+			var back_to: Vector2 = p.get("push_to", p["pos"])
+			var away: Vector2 = back_to - p["pos"]
+			var step := PUSHBACK_SPEED * dt
+			if away.length() <= step:
+				p["pos"] = back_to
+				p["state"] = "TAXI_OUT"
+				p["state_timer"] = 0.0
+			else:
+				p["pos"] = p["pos"] + away.normalized() * step
 
 		"TAXI_OUT":
 			match advance_along_path(p, taxi_speed(), dt):
@@ -1412,6 +2587,7 @@ func update_plane(p: Dictionary, dt: float) -> void:
 			if move_toward_point(p, start_end, taxi_speed(), dt):
 				p["state"] = "DEPARTING"
 				p["state_timer"] = 0.0
+				p["roll_start"] = p["pos"]
 
 		"DEPARTING":
 			var runway = grid.get_runway(p["runway_id"])
@@ -1419,16 +2595,27 @@ func update_plane(p: Dictionary, dt: float) -> void:
 				tow(p, "runway removed during takeoff")
 				return
 			var roll_to: Vector2 = runway["a"] if p.get("dep_from_b", false) else runway["b"]
-			if move_toward_point(p, roll_to, TAKEOFF_SPEED, dt):
+			var at_end := move_toward_point(p, roll_to, TAKEOFF_SPEED, dt)
+			# Rotate once the aircraft has used the pavement its class actually
+			# needs, rather than running to the far end every time. A regional on
+			# a 9,600ft runway should be airborne well before the end of it.
+			var rolled: float = p["pos"].distance_to(p.get("roll_start", p["pos"]))
+			var need: float = required_runway(p) * AirportGrid.TILE
+			var strip: float = (runway["a"] as Vector2).distance_to(runway["b"])
+			if at_end or rolled >= minf(need, strip * 0.92):
 				runway["occupied"] = false
 				p["runway_id"] = -1
 				p["state"] = "CLIMB_OUT"
 				p["state_timer"] = 0.0
+				p["liftoff_pos"] = p["pos"]
 
 		"CLIMB_OUT":
 			var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
 			p["pos"] = p["pos"] + fwd * TAKEOFF_SPEED * dt
-			if not get_viewport_rect().grow(120.0).has_point(p["pos"]):
+			# Bounds are the world, not the window. This used to test the
+			# viewport rect, which was the same thing only while the game was
+			# top-down 2D with a fixed camera.
+			if not grid.grid_rect().grow(260.0).has_point(p["pos"]):
 				add_log("%s departed." % p["callsign"])
 				p["state"] = "REMOVE"
 
@@ -1444,72 +2631,120 @@ func apply_tool_at(cell: Vector2i) -> void:
 			if not grid.can_place_taxiway(cell):
 				return
 			if money < COST_TAXIWAY:
-				add_log("Not enough cash for taxiway (%s)." % money_str(COST_TAXIWAY))
+				add_log("Not enough cash for taxiway (%s)." % money_str(COST_TAXIWAY), "muted")
 				return
-			money -= COST_TAXIWAY
+			_spend(COST_TAXIWAY, "tile", {"cells": [cell]})
 			grid.place_taxiway(cell)
 
-		Tool.GATE_SMALL, Tool.GATE_LARGE:
-			var size := tool_gate_size()
-			var cells := grid.gate_cells_for(cell, size)
-			if not grid.can_place_gate(cells):
+		Tool.STAND:
+			var cells := grid.stand_cells_for(cell, build_rot)
+			if not grid.can_place_stand(cells):
 				return
-			var gate_cost: int = COST_GATE_TILE * size
-			if money < gate_cost:
-				add_log("Not enough cash for that stand (%s)." % money_str(gate_cost))
+			if money < COST_STAND:
+				add_log("Not enough cash for a stand (%s)." % money_str(COST_STAND), "muted")
 				return
-			money -= gate_cost
-			var id := grid.place_gate(cells, size)
-			var kind := "widebody stand" if size >= 2 else "stand"
-			var gate = grid.get_gate(id)
-			if grid.gate_is_connected(gate):
-				add_log("Built Gate %d (%s) for %s." % [id + 1, kind, money_str(gate_cost)])
+			_spend(COST_STAND, "tile", {"cells": cells.duplicate()})
+			var id := grid.place_stand(cells, build_rot)
+			var stand = grid.get_stand(id)
+			if not grid.stand_is_connected(stand):
+				add_log("Built Stand %d — NOT connected to a taxiway, no flights will use it." % (id + 1), "warning")
+			elif not grid.stand_is_contact(stand):
+				add_log("Built Stand %d for %s — remote, so passengers have to be bussed." % [
+					id + 1, money_str(COST_STAND),
+				])
 			else:
-				add_log("Built Gate %d — NOT connected to a taxiway, no flights will use it." % (id + 1))
+				add_log("Built Stand %d for %s." % [id + 1, money_str(COST_STAND)])
 
 		Tool.TERMINAL:
-			if not grid.can_place_terminal(cell):
+			var tcells := grid.building_cells(cell, AirportGrid.TERMINAL_SIZE, build_rot)
+			if not grid.can_place_terminal(tcells):
 				return
-			if money < COST_TERMINAL_TILE:
-				add_log("Not enough cash for a concourse section (%s)." % money_str(COST_TERMINAL_TILE))
+			if money < COST_TERMINAL:
+				add_log("Not enough cash for a terminal (%s)." % money_str(COST_TERMINAL), "muted")
 				return
-			money -= COST_TERMINAL_TILE
-			grid.place_terminal(cell)
-			add_log("Built concourse section for %s — passenger capacity now %d." % [
-				money_str(COST_TERMINAL_TILE), capacity("term"),
-			])
-			if not grid.is_road_served(cell):
-				add_log("That concourse has no road access — it handles no passengers.")
+			if not paused:
+				_ask("Build a terminal hall for %s?\n\nConcourses attach to it at right angles, and stands attach to those." % money_str(COST_TERMINAL),
+					_do_place_terminal.bind(tcells, build_rot))
+				return
+			_do_place_terminal(tcells, build_rot)
+
+		Tool.CONCOURSE:
+			var ccells := grid.building_cells(cell, AirportGrid.CONCOURSE_SIZE, build_rot)
+			if not grid.can_place_concourse(ccells):
+				return
+			if money < COST_CONCOURSE:
+				add_log("Not enough cash for a concourse (%s)." % money_str(COST_CONCOURSE), "muted")
+				return
+			_spend(COST_CONCOURSE, "tile", {"cells": ccells.duplicate()})
+			var cid := grid.place_concourse(ccells, build_rot)
+			add_log("Built Concourse %d for %s — put stands down either flank." % [
+				cid + 1, money_str(COST_CONCOURSE),
+			], "build")
 
 		Tool.ROAD:
 			if not grid.can_place_road(cell):
 				return
 			if money < COST_ROAD_TILE:
-				add_log("Not enough cash for road (%s)." % money_str(COST_ROAD_TILE))
+				add_log("Not enough cash for road (%s)." % money_str(COST_ROAD_TILE), "muted")
 				return
-			money -= COST_ROAD_TILE
+			_spend(COST_ROAD_TILE, "tile", {"cells": [cell]})
 			grid.place_road(cell)
 
 		Tool.PARKING:
 			if not grid.can_place_parking(cell):
 				return
 			if money < COST_PARKING_TILE:
-				add_log("Not enough cash for a car park (%s)." % money_str(COST_PARKING_TILE))
+				add_log("Not enough cash for a car park (%s)." % money_str(COST_PARKING_TILE), "muted")
 				return
-			money -= COST_PARKING_TILE
+			_spend(COST_PARKING_TILE, "tile", {"cells": [cell]})
 			grid.place_parking(cell)
 			if not grid.is_road_served(cell):
-				add_log("Car park built but has no road to it — handles nobody yet.")
+				add_log("Car park built but has no road to it — handles nobody yet.", "warning")
+
+		Tool.LAND:
+			var tract := grid.tract_at(cell)
+			if tract < 0:
+				_try_release_tract(cell)
+				return
+			var land_cost := grid.tract_tiles(tract) * COST_LAND_TILE
+			if money < land_cost:
+				add_log("Not enough cash for that tract (%s)." % money_str(land_cost), "muted")
+				return
+			if land_cost >= CONFIRM_THRESHOLD and not paused:
+				var tsz: Rect2i = AirportGrid.TRACTS[tract]
+				_ask("Buy the %d x %d tract for %s?" % [tsz.size.x, tsz.size.y, money_str(land_cost)],
+					_do_buy_tract.bind(tract))
+				return
+			_do_buy_tract(tract)
 
 		Tool.DEMOLISH:
 			var preview := grid.demolish_preview(cell)
 			if preview.is_empty():
-				add_log("Can't demolish that — it's in use or empty.")
+				add_log("Can't demolish that — it's in use or empty.", "muted")
 				return
-			var refund := int(round(tile_cost(preview["type"]) * preview["tiles"] * REFUND_RATE))
-			grid.demolish(cell)
-			money += refund
-			add_log("Demolished %d tile(s), recovered %s." % [preview["tiles"], money_str(refund)])
+
+			# Still inside the pause it was bought in: this is an undo, refunded
+			# in full and struck from the ledger.
+			var undo := _ledger_take_cells(preview["cells"])
+			if undo >= 0:
+				grid.demolish(cell)
+				money += undo
+				add_log("Undid %d tile(s) — %s refunded in full." % [
+					preview["tiles"], money_str(undo),
+				], "build")
+				render3d.mark_layout_dirty()
+				return
+
+			var fee := COST_DEMOLISH_TILE * int(preview["tiles"])
+			if money < fee:
+				add_log("Not enough cash to demolish that (%s)." % money_str(fee), "muted")
+				return
+			_confirm_demolish(cell, preview, fee)
+			return
+
+	# Every branch above either returned on failure or changed the layout, so the
+	# 3D world is only rebuilt when something actually moved.
+	render3d.mark_layout_dirty()
 
 
 func commit_runway(from: Vector2i, to: Vector2i) -> void:
@@ -1527,13 +2762,19 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 		var added: float = maxf(0.0, pa.distance_to(pb) / AirportGrid.TILE)
 		var ext_cost := int(round(COST_RUNWAY_TILE * added))
 		if money < ext_cost:
-			add_log("Not enough cash — that extension costs %s." % money_str(ext_cost))
+			add_log("Not enough cash — that extension costs %s." % money_str(ext_cost), "muted")
 			return
 		grid.extend_runway_seg(extend_id, pb)
+		# Marked before the no-op check below: the segment was already restamped,
+		# so the 3D geometry is stale either way.
+		render3d.mark_layout_dirty()
 		if is_equal_approx(grid.runway_length_tiles(existing), before):
 			add_log("That drag wouldn't lengthen Runway %s." % grid.runway_name(existing))
 			return
-		money -= ext_cost
+		# Recorded with no cells, so it counts toward the resume total but cannot
+		# be picked up by an undo: shortening a runway back to its old endpoint
+		# is not something the grid supports.
+		_spend(ext_cost, "runway_extension", {"cells": []})
 		add_log("Extended Runway %s to %s for %s — now takes %s." % [
 			grid.runway_name(existing), length_str(grid.runway_length_tiles(existing)),
 			money_str(ext_cost), _runway_capability(grid.runway_length_tiles(existing)),
@@ -1546,29 +2787,49 @@ func commit_runway(from: Vector2i, to: Vector2i) -> void:
 	var tiles_used: float = pa.distance_to(pb) / AirportGrid.TILE + 1.0
 	var cost := int(round(COST_RUNWAY_TILE * tiles_used))
 	if money < cost:
-		add_log("Not enough cash — that runway costs %s." % money_str(cost))
+		add_log("Not enough cash — that runway costs %s." % money_str(cost), "muted")
 		return
 
 	money -= cost
 	var id := grid.place_runway_seg(pa, pb)
 	var runway = grid.get_runway(id)
+	# Ledgered after placement, because the footprint cells only exist once the
+	# segment is stamped. Demolish already clears a runway by all of its cells,
+	# so this undoes naturally.
+	if paused:
+		pause_ledger.append({
+			"kind": "tile", "cost": cost, "cells": (runway["cells"] as Array).duplicate(),
+		})
 	var length: float = grid.runway_length_tiles(runway)
 	if length < float(AirportGrid.MIN_RUNWAY_LEN):
 		add_log("Built Runway %s for %s — TOO SHORT (needs %s)." % [
 			grid.runway_name(runway), money_str(cost),
 			length_str(float(AirportGrid.MIN_RUNWAY_LEN)),
-		])
+		], "warning")
 	elif not grid.runway_is_usable(runway):
 		add_log("Built Runway %s for %s — no taxiway connection yet." % [
 			grid.runway_name(runway), money_str(cost),
-		])
+		], "warning")
 	else:
 		add_log("Built Runway %s (%s) for %s — takes %s." % [
 			grid.runway_name(runway), length_str(length), money_str(cost),
 			_runway_capability(length),
 		])
-func tool_gate_size() -> int:
-	return 2 if tool == Tool.GATE_LARGE else 1
+	render3d.mark_layout_dirty()
+# The ghost reads `build_rot` directly, so flipping it is the whole action —
+# the preview under the cursor turns on the next frame.
+func _rotate_build() -> void:
+	build_rot = 1 - build_rot
+	if not tool_is_rotatable():
+		add_log("Rotation set to %s — it only affects multi-tile builds." % rot_name(), "muted")
+
+
+func tool_is_rotatable() -> bool:
+	return tool in [Tool.STAND, Tool.TERMINAL, Tool.CONCOURSE]
+
+
+func rot_name() -> String:
+	return "north-south" if build_rot == 1 else "east-west"
 
 
 func tile_cost(type: int) -> int:
@@ -1577,10 +2838,10 @@ func tile_cost(type: int) -> int:
 			return COST_TAXIWAY
 		AirportGrid.TileType.RUNWAY:
 			return COST_RUNWAY_TILE
-		AirportGrid.TileType.GATE:
-			return COST_GATE_TILE
-		AirportGrid.TileType.TERMINAL:
-			return COST_TERMINAL_TILE
+		AirportGrid.TileType.STAND:
+			return COST_STAND
+		AirportGrid.TileType.CONCOURSE:
+			return COST_CONCOURSE
 		AirportGrid.TileType.ROAD:
 			return COST_ROAD_TILE
 		AirportGrid.TileType.PARKING:
@@ -1593,10 +2854,17 @@ func tile_cost(type: int) -> int:
 func _unhandled_input(event: InputEvent) -> void:
 	if setup_stage < 2:
 		return
+	# The confirmation dialog is modal. There is no input-blocking Control in
+	# this project; GameOverPanel gets by the same way a few lines below.
+	if confirm_pending:
+		return
 
 	# Save/load stay available after a shutdown so a bad run can be rolled back.
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
+			KEY_F1:
+				_toggle_help()
+				return
 			KEY_F5:
 				save_game()
 				return
@@ -1627,12 +2895,18 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_D:
 				decline_offer()
 				return
+			KEY_Q:
+				_rotate_build()
+				return
 		if TOOL_KEYS.has(event.keycode):
 			_choose_tool(TOOL_KEYS[event.keycode])
 		return
 
+	# Under the old top-down view the mouse position WAS the world position. In 3D
+	# it is a ray, so every screen coordinate has to be intersected with the
+	# ground plane first — see Render3D.screen_to_world().
 	if event is InputEventMouseMotion:
-		hover_cell = grid.world_to_cell(event.position)
+		hover_cell = grid.world_to_cell(render3d.screen_to_world(event.position))
 		if is_dragging and tool == Tool.TAXIWAY:
 			apply_tool_at(hover_cell)
 		return
@@ -1640,11 +2914,12 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventMouseButton) or event.button_index != MOUSE_BUTTON_LEFT:
 		return
 
-	var cell := grid.world_to_cell(event.position)
+	var world := render3d.screen_to_world(event.position)
+	var cell := grid.world_to_cell(world)
 
 	if event.pressed:
 		if tool == Tool.SELECT:
-			_handle_select_click(event.position, cell)
+			_handle_select_click(world, cell)
 			return
 		is_dragging = true
 		drag_start = cell
@@ -1664,21 +2939,21 @@ func _handle_select_click(pos: Vector2, cell: Vector2i) -> void:
 			add_log("Selected %s (%s)." % [p["callsign"], p["state"]])
 			return
 
-	var gate = grid.gate_at(cell)
-	if gate != null:
-		if gate["occupied"]:
-			add_log("Gate %d is occupied." % (gate["id"] + 1))
+	var stand = grid.stand_at(cell)
+	if stand != null:
+		if stand["occupied"]:
+			add_log("Stand %d is occupied." % (stand["id"] + 1), "muted")
 			return
-		if not grid.gate_is_connected(gate):
-			add_log("Gate %d has no taxiway connection." % (gate["id"] + 1))
+		if not grid.stand_is_connected(stand):
+			add_log("Stand %d has no taxiway connection." % (stand["id"] + 1), "muted")
 			return
 		var p = find_plane(selected_plane_id)
 		if p == null:
 			add_log("Select a holding plane first.")
 		elif p["state"] != "HOLDING":
-			add_log("%s is not holding for a gate." % p["callsign"])
+			add_log("%s is not holding for a stand." % p["callsign"], "muted")
 		else:
-			assign_gate_manual(p, gate)
+			assign_stand_manual(p, stand)
 			selected_plane_id = -1
 		return
 
@@ -1694,9 +2969,15 @@ func _process(delta: float) -> void:
 		_simulate(dt)
 		if reputation <= 0:
 			_end_run()
+	# Topped up rather than made free, so every cost, guard and ledger entry
+	# still runs — see SANDBOX_CASH.
+	if sandbox:
+		money = SANDBOX_CASH
 	_update_hud()
 	_update_ops_ui()
+	_update_bank_ui()
 	_update_route_ui()
+	_sync_world()
 	queue_redraw()
 
 
@@ -1716,7 +2997,7 @@ func _end_run() -> void:
 		+ "Total earned:    %s" % money_str(earned)
 	)
 	$UI/GameOverPanel.visible = true
-	add_log("GAME OVER — reputation hit zero after %d:%02d." % [minutes, seconds])
+	add_log("GAME OVER — reputation hit zero after %d:%02d." % [minutes, seconds], "critical")
 
 
 # The narrowest link in the chain from approach to stand: airborne slots,
@@ -1724,8 +3005,8 @@ func _end_run() -> void:
 # the tower matters, which is why buying tower capacity alone made things worse.
 func service_capacity() -> int:
 	var stands := 0
-	for g in grid.gates:
-		if grid.gate_is_connected(g):
+	for g in grid.stands:
+		if grid.stand_is_connected(g):
 			stands += 1
 	return maxi(1, mini(
 		mini(stands, capacity("crew")),
@@ -1783,12 +3064,14 @@ func _simulate(dt: float) -> void:
 
 # --- persistence ---
 
-func save_game() -> void:
+func save_game(slot: int = -1) -> void:
+	if slot < 0:
+		slot = last_slot
 	# Saving a shut-down airport would just reload straight back into game over.
 	if game_over:
-		add_log("Can't save a shut-down airport.")
+		add_log("Can't save a shut-down airport.", "muted")
 		return
-	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	var f := FileAccess.open(save_path(slot), FileAccess.WRITE)
 	if f == null:
 		add_log("Could not write the save file.")
 		return
@@ -1799,6 +3082,8 @@ func save_game() -> void:
 		"next_spawn_at": next_spawn_at, "plane_id_seq": plane_id_seq,
 		"day": day, "day_time": day_time, "day_revenue": day_revenue,
 		"last_day_revenue": last_day_revenue, "last_upkeep": last_upkeep,
+		"loan_principal": loan_principal, "last_interest": last_interest,
+		"sandbox": sandbox,
 		"facilities": facilities.duplicate(),
 		"routes": routes.duplicate(true),
 		"arrival_queue": arrival_queue.duplicate(true),
@@ -1808,69 +3093,96 @@ func save_game() -> void:
 		"offer": null if offer == null else offer.duplicate(true),
 		"next_offer_at": next_offer_at,
 		"grid": grid.to_dict(),
+		"saved_at": Time.get_datetime_string_from_system(true, true),
 	})
 	f.close()
-	add_log("Airport saved.")
+	last_slot = slot
+	add_log("Airport saved to slot %d." % slot, "build")
 	_refresh_save_buttons()
 
 
-func load_game() -> void:
-	if not FileAccess.file_exists(SAVE_PATH):
+func load_game(slot: int = -1) -> void:
+	if slot < 0:
+		slot = last_slot
+	if not FileAccess.file_exists(save_path(slot)):
+		add_log("Slot %d is empty." % slot, "muted")
 		return
-	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	var f := FileAccess.open(save_path(slot), FileAccess.READ)
 	if f == null:
 		add_log("Could not read the save file.")
 		return
 	var d = f.get_var()
 	f.close()
 	if typeof(d) != TYPE_DICTIONARY or d.get("version") != SAVE_VERSION:
-		add_log("That save was made by a different version — ignoring it.")
+		add_log("Slot %d was written by a different version — ignoring it." % slot, "warning")
 		return
 
 	# Airborne aircraft are not saved, so clear the sky before restoring.
 	planes.clear()
 	selected_plane_id = -1
-	grid.from_dict(d["grid"])
+	grid.from_dict(d.get("grid", grid.to_dict()))
+	render3d.mark_layout_dirty()
+	# A restored game starts with nothing uncommitted, whatever was pending when
+	# the save was written.
+	pause_ledger.clear()
 
-	money = d["money"]
-	reputation = d["reputation"]
-	time_elapsed = d["time_elapsed"]
-	served = d["served"]
-	diverted = d["diverted"]
-	earned = d["earned"]
-	next_spawn_at = d["next_spawn_at"]
-	plane_id_seq = d["plane_id_seq"]
-	day = d["day"]
-	day_time = d["day_time"]
-	day_revenue = d["day_revenue"]
-	last_day_revenue = d["last_day_revenue"]
-	last_upkeep = d["last_upkeep"]
-	facilities = d["facilities"]
+	money = d.get("money", money)
+	reputation = d.get("reputation", reputation)
+	time_elapsed = d.get("time_elapsed", time_elapsed)
+	served = d.get("served", served)
+	diverted = d.get("diverted", diverted)
+	earned = d.get("earned", earned)
+	next_spawn_at = d.get("next_spawn_at", next_spawn_at)
+	plane_id_seq = d.get("plane_id_seq", plane_id_seq)
+	day = d.get("day", day)
+	day_time = d.get("day_time", day_time)
+	day_revenue = d.get("day_revenue", day_revenue)
+	last_day_revenue = d.get("last_day_revenue", last_day_revenue)
+	last_upkeep = d.get("last_upkeep", last_upkeep)
+	# Defaulted rather than version-gated: a save written before financing
+	# existed simply restores as an airport with no debt, which is exactly right.
+	loan_principal = d.get("loan_principal", 0)
+	last_interest = d.get("last_interest", 0)
+	sandbox = d.get("sandbox", false)
+	_refresh_sandbox_btn()
+	facilities = d.get("facilities", facilities)
 	# No aircraft are restored, so nothing is holding ground support.
 	for k in used:
 		used[k] = 0
-	routes = d["routes"]
-	arrival_queue = d["arrival_queue"]
-	hub_airline = d["hub_airline"]
+	routes = d.get("routes", routes)
+	arrival_queue = d.get("arrival_queue", arrival_queue)
+	hub_airline = d.get("hub_airline", hub_airline)
 	# Location has to come back too, or weather and origins would be wrong.
-	continent_idx = d["continent_idx"]
+	continent_idx = d.get("continent_idx", continent_idx)
 	if continent_idx >= 0:
 		continent_name = Regions.CONTINENTS[continent_idx]["name"]
 		for r in Regions.CONTINENTS[continent_idx]["regions"]:
-			if r["name"] == d["region_name"]:
+			if r["name"] == d.get("region_name", ""):
 				region = r
 		setup_stage = 2
+		# Without this a restored save rendered with the fallback temperate
+		# palette and no terrain at all: set_terrain had exactly one call site,
+		# in _choose_setup, which loading never goes through.
+		if region.has("terrain"):
+			render3d.set_terrain(Regions.TERRAIN[region["terrain"]])
 		_show_setup()
-	offer = d["offer"]
-	next_offer_at = d["next_offer_at"]
+	offer = d.get("offer", offer)
+	next_offer_at = d.get("next_offer_at", next_offer_at)
 
 	game_over = false
 	$UI/GameOverPanel.visible = false
-	add_log("Airport restored — the sky starts empty.")
+	last_slot = slot
+	_refresh_save_buttons()
+	add_log("Airport restored from slot %d — the sky starts empty." % slot, "build")
 
 
 func _refresh_save_buttons() -> void:
-	$UI/LoadBtn.disabled = not FileAccess.file_exists(SAVE_PATH)
+	var any := false
+	for i in range(1, SAVE_SLOTS + 1):
+		if FileAccess.file_exists(save_path(i)):
+			any = true
+	$UI/LoadBtn.disabled = not any
+	_refresh_slot_rows()
 
 
 # GDScript has no thousands separator, and "10800 ft" reads badly.
@@ -1919,9 +3231,13 @@ func _update_ops_ui() -> void:
 	day_label.text = "Day %d · %ds to close%s" % [day, left, wx_txt]
 	day_label.modulate = Color(1.0, 0.72, 0.35) if not weather.is_empty() else Color.WHITE
 
-	var stranded := grid.count_tiles(AirportGrid.TileType.TERMINAL, false) \
-		- grid.count_tiles(AirportGrid.TileType.TERMINAL, true)
-	var road_note := "" if stranded == 0 else "  !! %d concourse unroaded" % stranded
+	# The HALL is what a road has to reach: it processes the passengers and it is
+	# the only building passenger capacity is derived from. Piers are airside and
+	# never touch a road by design, so counting those — which this did, from back
+	# when a concourse tile WAS the hall — left the warning lit permanently on a
+	# perfectly well-connected airport.
+	var stranded := grid.terminal_tile_count(false) - grid.terminal_tile_count(true)
+	var road_note := "" if stranded == 0 else "  !! %d terminal unroaded" % stranded
 	capacity_label.text = "Airborne %d/%d · Crew %d/%d · Fuel %d/%d\nPax %d/%d · Checks %d/%d\nUpkeep %s/day%s\nLast day: %s in, %s out" % [
 		airborne_count(), effective_air_capacity(),
 		used["crew"], capacity("crew"),
@@ -1949,6 +3265,17 @@ func _update_ops_ui() -> void:
 		]
 		$UI/FacilityPanel.get_node("Row%dBuy" % i).disabled = money < int(f["cost"])
 		$UI/FacilityPanel.get_node("Row%dSell" % i).disabled = n <= 0
+
+		# Label defaults to MOUSE_FILTER_IGNORE, which swallows the tooltip
+		# entirely — without this the text is set but never shown.
+		var tip: String = "%s\n\n%s\n\nEach unit: +%d %s · %s to buy · %s/day" % [
+			f["name"], f["desc"], int(f["per_unit"]), f["unit"],
+			money_str(f["cost"]), money_str(f["upkeep"]),
+		]
+		lbl.mouse_filter = Control.MOUSE_FILTER_STOP
+		lbl.tooltip_text = tip
+		$UI/FacilityPanel.get_node("Row%dBuy" % i).tooltip_text = tip
+		$UI/FacilityPanel.get_node("Row%dSell" % i).tooltip_text = tip
 
 
 func _update_route_ui() -> void:
@@ -2013,6 +3340,10 @@ func _update_route_ui() -> void:
 
 func _update_hud() -> void:
 	money_label.text = "Cash: %s" % money_str(money)
+	if sandbox:
+		money_label.text = "SANDBOX — cash unlimited"
+	if loan_principal > 0:
+		money_label.text += "   ·   debt %s" % money_str(loan_principal)
 	rep_label.text = "Reputation: %d" % reputation
 	# Reputation is the lose condition, so make it shout before it runs out.
 	if reputation < 25:
@@ -2023,37 +3354,39 @@ func _update_hud() -> void:
 		rep_label.modulate = Color.WHITE
 	var clock := "PAUSED" if paused else "%dx" % int(speed)
 	next_in_label.text = "Next flight in: %.1fs   [%s]" % [max(0.0, next_spawn_at - time_elapsed), clock]
+	# While paused, show what is still undoable — it is the whole point of the
+	# pause window, and it disappears the moment time resumes.
+	if paused and not pause_ledger.is_empty():
+		next_in_label.text += "   ·   %s uncommitted" % money_str(pause_spend_total())
 
 	var usable_runways := 0
 	for r in grid.runways:
 		if grid.runway_is_usable(r):
 			usable_runways += 1
-	var connected_gates := 0
-	var wide_stands := 0
+	var connected_stands := 0
+
 	var contact_stands := 0
-	for g in grid.gates:
-		if grid.gate_is_connected(g):
-			connected_gates += 1
-			if g["size"] >= 2:
-				wide_stands += 1
-			if grid.gate_is_contact(g):
+	for g in grid.stands:
+		if grid.stand_is_connected(g):
+			connected_stands += 1
+			if grid.stand_is_contact(g):
 				contact_stands += 1
 	var longest := 0.0
 	for r in grid.runways:
 		if grid.runway_is_usable(r):
 			longest = maxf(longest, grid.runway_length_tiles(r))
-	stats_label.text = "Runways: %d (%d usable, longest %s → %s)\nStands: %d connected of %d (%d widebody, %d bridged)\nAircraft: %d\nServed: %d   Lost: %d" % [
+	stats_label.text = "Runways: %d (%d usable, longest %s → %s)\nStands: %d connected of %d (%d bridged)\nAircraft: %d\nServed: %d   Lost: %d" % [
 		grid.runways.size(), usable_runways, length_str(longest), _runway_capability(longest),
-		connected_gates, grid.gates.size(), wide_stands, contact_stands, planes.size(),
+		connected_stands, grid.stands.size(), contact_stands, planes.size(),
 		served, diverted,
 	]
 
 	match tool:
 		Tool.SELECT:
-			hint_label.text = "SELECT — click a plane to see its route,\nthen click a free gate to assign it."
-			tool_info_label.text = "Demolish refunds %d%%" % int(REFUND_RATE * 100)
+			hint_label.text = "SELECT — click a plane to see its route,\nthen click a free stand to assign it."
+			tool_info_label.text = "Demolish costs %s per tile" % money_str(COST_DEMOLISH_TILE)
 		Tool.TAXIWAY:
-			hint_label.text = "TAXIWAY — click or drag to paint.\nGates and runways need a taxiway connection."
+			hint_label.text = "TAXIWAY — click or drag to paint.\nStands and runways need a taxiway connection."
 			tool_info_label.text = "%s per tile" % money_str(COST_TAXIWAY)
 		Tool.RUNWAY:
 			hint_label.text = "RUNWAY — drag any angle. 1 tile = %d %s\n%s" % [
@@ -2076,19 +3409,24 @@ func _update_hud() -> void:
 				var cap := _runway_capability(total)
 				var takes := "too short" if cap == "-" else "takes " + cap
 				var prefix := "extend to " if ext >= 0 else ""
-				var heading := "%03d°" % int(round(rad_to_deg(atan2((pb - pa).x, -(pb - pa).y) + TAU)) % 360)
+				# int() has to close before the modulo, not after it: round() returns
+				# a float and GDScript's % rejects float operands outright.
+				var heading := "%03d°" % (int(round(rad_to_deg(atan2((pb - pa).x, -(pb - pa).y) + TAU))) % 360)
 				tool_info_label.text = "%s%s · %s · %s · %s" % [prefix, length_str(total), heading, takes, money_str(cost)]
 			else:
 				tool_info_label.text = "%s per tile" % money_str(COST_RUNWAY_TILE)
-		Tool.GATE_SMALL:
-			hint_label.text = "STAND (small) — 1 tile, next to a taxiway.\nTakes Light and Narrowbody."
-			tool_info_label.text = money_str(COST_GATE_TILE)
-		Tool.GATE_LARGE:
-			hint_label.text = "STAND (widebody) — 2 tiles wide.\nTakes any aircraft, including Widebody."
-			tool_info_label.text = money_str(COST_GATE_TILE * 2)
+		Tool.STAND:
+			hint_label.text = "STAND — 2x2, beside a taxiway. Takes any aircraft.\nGoes against a concourse, never the terminal itself."
+			tool_info_label.text = "%s · %s (Q to rotate)" % [money_str(COST_STAND), rot_name()]
 		Tool.TERMINAL:
-			hint_label.text = "CONCOURSE — click to build. Stands touching one\nget a jet bridge; the rest have to bus passengers."
-			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_TERMINAL_TILE), TERM_UNITS_PER_TILE]
+			hint_label.text = "TERMINAL — the 6x2 hall, laid %s. Needs a road.\nConcourses attach to it; stands attach to those." % rot_name()
+			tool_info_label.text = "%s · +%d pax units (Q to rotate)" % [
+				money_str(COST_TERMINAL),
+				AirportGrid.TERMINAL_SIZE.x * AirportGrid.TERMINAL_SIZE.y * TERM_UNITS_PER_TILE,
+			]
+		Tool.CONCOURSE:
+			hint_label.text = "CONCOURSE — a 1x4 pier, laid %s. Must meet a\nterminal end-on. Stands go down either flank." % rot_name()
+			tool_info_label.text = "%s · %s (Q to rotate)" % [money_str(COST_CONCOURSE), rot_name()]
 		Tool.ROAD:
 			hint_label.text = "ROAD — click or drag. Must reach the map edge\nto bring passengers in."
 			tool_info_label.text = "%s per tile" % money_str(COST_ROAD_TILE)
@@ -2096,194 +3434,303 @@ func _update_hud() -> void:
 			hint_label.text = "CAR PARK — click to build beside a road.\nAdds passenger capacity."
 			tool_info_label.text = "%s · +%d pax units" % [money_str(COST_PARKING_TILE), PARK_UNITS_PER_TILE]
 		Tool.DEMOLISH:
-			hint_label.text = "DEMOLISH — click to remove.\nOccupied gates and runways can't be removed."
-			tool_info_label.text = "Refunds %d%%" % int(REFUND_RATE * 100)
+			hint_label.text = "DEMOLISH — costs %s per tile, no refund.\nWhile paused, anything you just built undoes in full." % money_str(COST_DEMOLISH_TILE)
+			tool_info_label.text = "%s per tile — no refund" % money_str(COST_DEMOLISH_TILE)
+		Tool.LAND:
+			hint_label.text = "BUY LAND — click a marked tract to buy it.\nNothing can be built on land you don't own."
+			var hovered := grid.tract_at(hover_cell)
+			if hovered >= 0:
+				var tr: Rect2i = AirportGrid.TRACTS[hovered]
+				tool_info_label.text = "%d x %d tract · %s" % [
+					tr.size.x, tr.size.y,
+					money_str(grid.tract_tiles(hovered) * COST_LAND_TILE),
+				]
+			else:
+				tool_info_label.text = "%s per tile" % money_str(COST_LAND_TILE)
 
 
 # --- rendering ---
+#
+# The world itself is drawn in 3D by `render3d` (see Render3D.gd). What remains
+# here is everything that must stay in screen space: labels, the grid overlay,
+# and the selected aircraft's route. Those are positioned by projecting a world
+# point through the camera with `render3d.world_to_screen()`, so they track the
+# 3D scene exactly while staying upright and crisp at any camera angle.
 
-func _draw() -> void:
-	var view := get_viewport_rect()
-	draw_rect(view, Color(0.227, 0.361, 0.227), true)
-
-	var field := grid.grid_rect()
-	draw_rect(field, Color(0.19, 0.31, 0.19), true)
-	_draw_grid_lines(field)
-
-	for cell in grid.tiles:
-		match grid.tile_type(cell):
-			AirportGrid.TileType.TAXIWAY:
-				_draw_tile(cell, Color(0.40, 0.40, 0.43))
-			AirportGrid.TileType.TERMINAL:
-				_draw_tile(cell, Color(0.36, 0.33, 0.45))
-				draw_rect(_cell_rect(cell), Color(0.62, 0.58, 0.78), false, 1.5)
-			AirportGrid.TileType.ROAD:
-				_draw_tile(cell, Color(0.24, 0.24, 0.26))
-				var mid := grid.cell_to_world(cell)
-				draw_line(mid - Vector2(0, 5), mid + Vector2(0, 5), Color(0.85, 0.8, 0.4, 0.7), 1.0)
-			AirportGrid.TileType.PARKING:
-				_draw_tile(cell, Color(0.30, 0.31, 0.33))
-				var r := _cell_rect(cell).grow(-4.0)
-				# Bay markings, so a car park reads differently from taxiway at a glance.
-				for i in 3:
-					var x := r.position.x + r.size.x * (float(i) + 0.5) / 3.0
-					draw_line(Vector2(x, r.position.y), Vector2(x, r.end.y), Color(0.75, 0.75, 0.8, 0.5), 1.0)
-
-	for r in grid.runways:
-		_draw_runway(r)
-	for g in grid.gates:
-		_draw_gate(g)
-
-	_draw_selected_route()
-
-	for p in planes:
-		_draw_plane(p)
-
-	_draw_ghost()
-
-
-func _draw_grid_lines(field: Rect2) -> void:
-	var line_color := Color(1, 1, 1, 0.045)
-	for x in range(AirportGrid.COLS + 1):
-		var px: float = field.position.x + x * AirportGrid.TILE
-		draw_line(Vector2(px, field.position.y), Vector2(px, field.end.y), line_color, 1.0)
-	for y in range(AirportGrid.ROWS + 1):
-		var py: float = field.position.y + y * AirportGrid.TILE
-		draw_line(Vector2(field.position.x, py), Vector2(field.end.x, py), line_color, 1.0)
-
-
-func _cell_rect(cell: Vector2i) -> Rect2:
-	return Rect2(AirportGrid.ORIGIN + Vector2(cell) * AirportGrid.TILE, Vector2(AirportGrid.TILE, AirportGrid.TILE))
-
-
-func _draw_tile(cell: Vector2i, color: Color) -> void:
-	draw_rect(_cell_rect(cell), color, true)
-
-
-# Largest aircraft class a runway of this length can take, as a letter code.
-func _runway_capability(length: float) -> String:
-	for i in range(CLASSES.size() - 1, -1, -1):
-		if length >= CLASSES[i]["min_runway"]:
-			return CLASSES[i]["code"]
-	return "-"
-
-
-# The runway ghost is a rotated strip rather than highlighted cells, so what the
-# player sees while dragging matches the shape they will actually get.
-func _draw_runway_ghost() -> void:
-	if not is_dragging or not grid.in_bounds(drag_start):
+func _sync_world() -> void:
+	if render3d == null:
 		return
-	var pa := grid.cell_to_world(drag_start)
-	var pb := grid.cell_to_world(hover_cell)
-	var axis := pb - pa
-	if axis.length() < 0.001:
-		axis = Vector2.RIGHT
-	axis = axis.normalized()
-	var perp := Vector2(-axis.y, axis.x) * (AirportGrid.TILE * 0.42)
-	var ea := pa - axis * (AirportGrid.TILE * 0.5)
-	var eb := pb + axis * (AirportGrid.TILE * 0.5)
-
-	var ext := grid.runway_extend_target(pa, pb)
-	var span: float = pa.distance_to(pb) / AirportGrid.TILE
-	var cost := int(round(COST_RUNWAY_TILE * (span if ext >= 0 else span + 1.0)))
-	var ok := money >= cost and (ext >= 0 or grid.can_place_runway_seg(pa, pb))
-	var tint := Color(0.45, 0.95, 0.5, 0.4) if ok else Color(0.95, 0.35, 0.35, 0.4)
-
-	draw_colored_polygon(PackedVector2Array([ea + perp, eb + perp, eb - perp, ea - perp]), tint)
-	draw_polyline(PackedVector2Array([
-		ea + perp, eb + perp, eb - perp, ea - perp, ea + perp,
-	]), Color(tint.r, tint.g, tint.b, 0.95), 2.0)
+	# The tower is a facility, not a placement, so nothing marks the layout dirty
+	# when one is commissioned. Pushing the count each frame is what makes buying,
+	# selling, undoing and loading all reach the renderer without each site having
+	# to remember to; the setter itself is a no-op unless the number moved.
+	render3d.set_tower_count(int(facilities.get("tower", 0)))
+	render3d.rebuild_if_dirty()
+	render3d.sync_stands()
+	render3d.sync_planes(_plane_records())
+	render3d.set_weather(weather.get("kind", ""))
+	_sync_ghost()
+	_update_closure_banner()
 
 
-func _draw_runway(r: Dictionary) -> void:
-	var a: Vector2 = r["a"]
-	var b: Vector2 = r["b"]
-	var axis := grid.runway_direction(r)
-	var perp := Vector2(-axis.y, axis.x) * (AirportGrid.TILE * 0.42)
-	# Overrun the ends by half a tile so the pavement covers the threshold cells.
-	var ea := a - axis * (AirportGrid.TILE * 0.5)
-	var eb := b + axis * (AirportGrid.TILE * 0.5)
-
-	var usable := grid.runway_is_usable(r)
-	var length: float = grid.runway_length_tiles(r)
-	var quad := PackedVector2Array([ea + perp, eb + perp, eb - perp, ea - perp])
-	draw_colored_polygon(quad, Color(0.28, 0.28, 0.30))
-	draw_dashed_line(a, b, Color(0.87, 0.87, 0.87, 0.8), 2.0, 12.0)
-
-	var label_color := Color(0.95, 0.55, 0.42) if r["occupied"] else Color(0.81, 0.91, 0.81)
-	if not usable:
-		label_color = Color(1.0, 0.45, 0.45)
-		draw_polyline(PackedVector2Array([
-			ea + perp, eb + perp, eb - perp, ea - perp, ea + perp,
-		]), Color(1.0, 0.35, 0.35, 0.9), 1.5)
-
-	var label := "RWY %s · %s · %s" % [grid.runway_name(r), length_str(length), _runway_capability(length)]
-	if length < float(AirportGrid.MIN_RUNWAY_LEN):
-		label += " (TOO SHORT)"
-	elif not usable:
-		label += " (NO TAXIWAY)"
-	draw_string(ThemeDB.fallback_font, a + Vector2(-14, -18), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, label_color)
-func _draw_gate(g: Dictionary) -> void:
-	var cells: Array = g["cells"]
-	var rect := _cell_rect(cells[0])
-	for c in cells:
-		rect = rect.merge(_cell_rect(c))
-
-	var connected := grid.gate_is_connected(g)
-	var fill := Color(0.75, 0.32, 0.25) if g["occupied"] else Color(0.18, 0.42, 0.18)
-	var outline := Color(1.0, 0.7, 0.63) if g["occupied"] else Color(0.61, 0.91, 0.61)
-	if not connected:
-		fill = Color(0.45, 0.35, 0.15)
-		outline = Color(1.0, 0.45, 0.45)
-
-	draw_rect(rect, fill, true)
-	draw_rect(rect, outline, false, 2.0)
-	var tag := "G%d%s" % [g["id"] + 1, "·W" if g["size"] >= 2 else ""]
-	draw_string(ThemeDB.fallback_font, rect.position + Vector2(6, 21), tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.95, 0.95, 0.95))
-	if not connected:
-		draw_string(ThemeDB.fallback_font, rect.position + Vector2(-6, -6), "unconnected", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1.0, 0.55, 0.55))
+# Altitude is a rendering concern only — the simulation is still purely 2D, and
+# deliberately so. Heights are eased rather than snapped so an aircraft rolling
+# out of LANDING doesn't drop through the runway in a single frame.
+const ALT_HOLD := 150.0
+const ALT_APPROACH := 108.0
+const ALT_CLIMB := 150.0
+# Distance over which the glideslope descends. Matches the lineup point APPROACH
+# flies to, so height reaches zero exactly on the threshold markings.
+const GLIDE_LEN := 220.0
+const CLIMB_GRADIENT := 0.26
 
 
-func _draw_selected_route() -> void:
-	var p = find_plane(selected_plane_id)
-	if p == null or p["path"].is_empty():
-		return
-	var points := PackedVector2Array([p["pos"]])
-	for i in range(p["path_index"], p["path"].size()):
-		points.append(grid.cell_to_world(p["path"][i]))
-	if points.size() > 1:
-		draw_polyline(points, Color(1.0, 0.37, 0.82, 0.65), 3.0)
+# Altitude is derived from POSITION on approach and departure, not from a
+# per-state constant. With constants an aircraft flew the whole approach at a
+# fixed height and then dropped after touchdown — and because height displaces a
+# sprite up-and-right in an isometric view, that made it look like it was landing
+# on the taxiway alongside the runway rather than on the runway.
+func _altitude_of(p: Dictionary, dt: float) -> float:
+	var target := 0.0
+	var continuous := true
+
+	match p["state"]:
+		"AIR_HOLD":
+			target = ALT_HOLD
+			continuous = false
+		"APPROACH":
+			target = ALT_APPROACH
+			continuous = false
+		"INBOUND":
+			# Glideslope: full height at the lineup point, wheels on the numbers.
+			var r = grid.get_runway(p["runway_id"])
+			if r != null:
+				var d: float = p["pos"].distance_to(grid.runway_threshold_point(r))
+				target = ALT_APPROACH * clampf(d / GLIDE_LEN, 0.0, 1.0)
+			else:
+				target = ALT_APPROACH
+		"CLIMB_OUT":
+			# Climb away on a gradient from wherever it rotated, rather than
+			# snapping to cruise the instant the wheels leave the ground.
+			var lift: Vector2 = p.get("liftoff_pos", p["pos"])
+			target = minf(ALT_CLIMB, p["pos"].distance_to(lift) * CLIMB_GRADIENT)
+
+	# Position-derived heights are already smooth, and easing them would let the
+	# aircraft float above the runway during the flare. Only the state-to-state
+	# steps get eased.
+	if continuous:
+		p["_render_alt"] = target
+		return target
+	var cur: float = float(p.get("_render_alt", target))
+	var eased: float = cur + (target - cur) * minf(1.0, dt * 2.2)
+	p["_render_alt"] = eased
+	return eased
 
 
-func _draw_plane(p: Dictionary) -> void:
+# Carried over verbatim from the old 2D renderer so aircraft state stays as
+# readable as it was. The colour now tints a ground ring under the aircraft
+# rather than the aircraft itself, which keeps the model's own livery visible.
+func _plane_status_color(p: Dictionary) -> Color:
 	var color := Color(0.91, 0.91, 0.91)
 	match p["state"]:
 		"AIR_HOLD":
 			color = Color(0.96, 0.65, 0.26)
 		"HOLDING":
 			color = Color(0.96, 0.83, 0.26)
-		"AT_GATE", "AWAIT_DEPART":
+		"AT_STAND", "AWAIT_DEPART":
 			color = Color(0.26, 0.77, 0.96)
 	if p["blocked_timer"] > 1.0:
 		color = Color(0.95, 0.35, 0.35)
 	# An emergency has to be findable at a glance, so it overrides state colour.
-	if p.get("emergency", false) and p["state"] != "AT_GATE":
+	if p.get("emergency", false) and p["state"] != "AT_STAND":
 		color = Color(1.0, 0.25, 0.55)
 	if selected_plane_id == p["id"]:
 		color = Color(1.0, 0.37, 0.82)
+	return color
 
-	var pos: Vector2 = p["pos"]
-	var fwd := Vector2(cos(p["heading"]), sin(p["heading"]))
-	var side := Vector2(-fwd.y, fwd.x)
-	var s: float = class_of(p)["scale"]
 
-	draw_line(pos + side * 9.0 * s, pos - side * 9.0 * s, color.darkened(0.25), 3.0 * s)
-	draw_colored_polygon(PackedVector2Array([
-		pos + fwd * 13.0 * s,
-		pos - fwd * 8.0 * s + side * 6.0 * s,
-		pos - fwd * 8.0 * s - side * 6.0 * s,
-	]), color)
+func _plane_records() -> Array:
+	var dt := get_process_delta_time()
+	var out: Array = []
+	for p in planes:
+		out.append({
+			"id": p["id"],
+			"pos": p["pos"],
+			"heading": p["heading"],
+			"altitude": _altitude_of(p, dt),
+			"class_code": class_of(p)["code"],
+			"airline": p["airline"],
+			"status": _plane_status_color(p),
+		})
+	return out
 
+
+func _sync_ghost() -> void:
+	if tool == Tool.SELECT or not grid.in_bounds(hover_cell):
+		render3d.clear_ghost()
+		return
+
+	if tool == Tool.LAND:
+		var tract := grid.tract_at(hover_cell)
+		if tract < 0:
+			render3d.clear_ghost()
+			return
+		var land_cost := grid.tract_tiles(tract) * COST_LAND_TILE
+		render3d.set_ghost_rect(AirportGrid.TRACTS[tract],
+			Color(0.45, 0.9, 1.0, 0.28) if money >= land_cost else Color(0.95, 0.35, 0.35, 0.28))
+		return
+
+	if tool == Tool.RUNWAY:
+		if not is_dragging or not grid.in_bounds(drag_start):
+			render3d.clear_ghost()
+			return
+		var pa := grid.cell_to_world(drag_start)
+		var pb := grid.cell_to_world(hover_cell)
+		var ext := grid.runway_extend_target(pa, pb)
+		var span: float = pa.distance_to(pb) / AirportGrid.TILE
+		var rcost := int(round(COST_RUNWAY_TILE * (span if ext >= 0 else span + 1.0)))
+		var rok := money >= rcost and (ext >= 0 or grid.can_place_runway_seg(pa, pb))
+		render3d.set_ghost_runway(pa, pb,
+			Color(0.45, 0.95, 0.5, 0.4) if rok else Color(0.95, 0.35, 0.35, 0.4))
+		return
+
+	var cells: Array = [hover_cell]
+	var ok := true
+	match tool:
+		Tool.TAXIWAY:
+			ok = grid.can_place_taxiway(hover_cell) and money >= COST_TAXIWAY
+		Tool.TERMINAL:
+			cells = grid.building_cells(hover_cell, AirportGrid.TERMINAL_SIZE, build_rot)
+			ok = grid.can_place_terminal(cells) and money >= COST_TERMINAL
+		Tool.CONCOURSE:
+			cells = grid.building_cells(hover_cell, AirportGrid.CONCOURSE_SIZE, build_rot)
+			ok = grid.can_place_concourse(cells) and money >= COST_CONCOURSE
+		Tool.ROAD:
+			ok = grid.can_place_road(hover_cell) and money >= COST_ROAD_TILE
+		Tool.PARKING:
+			ok = grid.can_place_parking(hover_cell) and money >= COST_PARKING_TILE
+		Tool.STAND:
+			cells = grid.stand_cells_for(hover_cell, build_rot)
+			ok = grid.can_place_stand(cells) and money >= COST_STAND
+		Tool.DEMOLISH:
+			var preview := grid.demolish_preview(hover_cell)
+			ok = not preview.is_empty()
+			if ok:
+				cells = preview["cells"]
+
+	var fill := Color(0.4, 1.0, 0.5, 0.35) if ok else Color(1.0, 0.3, 0.3, 0.35)
+	if tool == Tool.DEMOLISH and ok:
+		fill = Color(1.0, 0.65, 0.2, 0.4)
+	render3d.set_ghost_cells(cells, fill)
+
+
+# --- screen-space overlay ---------------------------------------------------
+
+func _draw() -> void:
+	if render3d == null or setup_stage < 2:
+		return
+
+	_draw_grid_overlay()
+	_draw_selected_route()
+
+	for r in grid.runways:
+		_label_runway(r)
+	for g in grid.stands:
+		_label_stand(g)
+	for p in planes:
+		_label_plane(p)
+
+	_draw_ghost_label()
+
+
+# The faint buildable-area grid. Projecting the ground endpoints rather than
+# drawing screen-aligned lines means it lands exactly on the 3D ground plane and
+# stays correct through every camera rotation.
+func _draw_grid_overlay() -> void:
+	# Drawn per owned tract rather than across the whole grid: gridding land the
+	# player does not own would imply they can build on it.
+	_grid_lines_for(AirportGrid.START_TRACT)
+	for i in AirportGrid.TRACTS.size():
+		if grid.owned_tracts.has(i):
+			_grid_lines_for(AirportGrid.TRACTS[i])
+
+
+func _grid_lines_for(b: Rect2i) -> void:
+	var line_color := Color(1, 1, 1, 0.05)
+	var t: float = AirportGrid.TILE
+	var o: Vector2 = AirportGrid.ORIGIN + Vector2(b.position) * t
+	var w: float = float(b.size.x) * t
+	var h: float = float(b.size.y) * t
+	for x in range(b.size.x + 1):
+		var px: float = o.x + float(x) * t
+		draw_line(render3d.world_to_screen(Vector2(px, o.y)),
+			render3d.world_to_screen(Vector2(px, o.y + h)), line_color, 1.0)
+	for y in range(b.size.y + 1):
+		var py: float = o.y + float(y) * t
+		draw_line(render3d.world_to_screen(Vector2(o.x, py)),
+			render3d.world_to_screen(Vector2(o.x + w, py)), line_color, 1.0)
+
+
+func _draw_selected_route() -> void:
+	var p = find_plane(selected_plane_id)
+	if p == null or p["path"].is_empty():
+		return
+	var points := PackedVector2Array([render3d.world_to_screen(p["pos"], Render3D.H_MARKING)])
+	for i in range(p["path_index"], p["path"].size()):
+		points.append(render3d.world_to_screen(
+			grid.cell_to_world(p["path"][i]), Render3D.H_MARKING))
+	if points.size() > 1:
+		draw_polyline(points, Color(1.0, 0.37, 0.82, 0.65), 3.0)
+
+
+# In-world text sits on whatever colour the terrain happens to be, and white on
+# desert tan or snow is close to unreadable. Each label gets its own dark plate
+# rather than an outline: an outline still loses contrast against a light
+# background, a plate cannot. `at` is a baseline, so the plate is measured back
+# up by the font's ascent.
+func _plate_string(at: Vector2, text: String, size: int, color: Color) -> void:
+	var font := ThemeDB.fallback_font
+	var w: float = font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	var asc := font.get_ascent(size)
+	var desc := font.get_descent(size)
+	draw_rect(Rect2(at.x - 4.0, at.y - asc - 2.0, w + 8.0, asc + desc + 4.0),
+		Color(0.04, 0.05, 0.07, 0.62), true)
+	draw_string(font, at, text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, color)
+
+
+func _label_runway(r: Dictionary) -> void:
+	var length: float = grid.runway_length_tiles(r)
+	var usable: bool = grid.runway_is_usable(r)
+	var label_color := Color(0.95, 0.55, 0.42) if r["occupied"] else Color(0.81, 0.91, 0.81)
+	if not usable:
+		label_color = Color(1.0, 0.45, 0.45)
+
+	var label := "RWY %s · %s · %s" % [
+		grid.runway_name(r), length_str(length), _runway_capability(length),
+	]
+	if length < float(AirportGrid.MIN_RUNWAY_LEN):
+		label += " (TOO SHORT)"
+	elif not usable:
+		label += " (NO TAXIWAY)"
+	var at: Vector2 = render3d.world_to_screen(r["a"], Render3D.H_MARKING) + Vector2(-14, -10)
+	_plate_string(at, label, 12, label_color)
+
+
+func _label_stand(g: Dictionary) -> void:
+	var cells: Array = g["cells"]
+	var centre := Vector2.ZERO
+	for c in cells:
+		centre += grid.cell_to_world(c)
+	centre /= float(cells.size())
+
+	var tag := "S%d" % (g["id"] + 1)
+	var at: Vector2 = render3d.world_to_screen(centre, Render3D.H_STAND) + Vector2(-10, 4)
+	_plate_string(at, tag, 12, Color(0.95, 0.95, 0.95))
+	if not grid.stand_is_connected(g):
+		_plate_string(at + Vector2(-8, -14), "unconnected", 10, Color(1.0, 0.55, 0.55))
+
+
+func _label_plane(p: Dictionary) -> void:
 	var label: String = "%s [%s]" % [p["callsign"], class_of(p)["code"]]
 	if p.get("emergency", false):
 		label = "!! " + label
@@ -2298,50 +3745,35 @@ func _draw_plane(p: Dictionary) -> void:
 			label += " (holding short)"
 	if p["blocked_timer"] > 1.0:
 		label += " !"
+
+	var alt: float = float(p.get("_render_alt", 0.0))
+	# Lifted clear of the model rather than sitting on it. Bare text could overlap
+	# an aircraft and still leave it readable; an opaque plate cannot, and a
+	# parked aircraft would otherwise be hidden under its own callsign.
+	var at: Vector2 = render3d.world_to_screen(p["pos"], alt + 42.0) + Vector2(-22, -8)
 	# Skip the label while the aircraft is still flying in from off-map, or it
-	# renders as clipped text jammed against the left edge.
-	if pos.x > 28.0:
-		draw_string(ThemeDB.fallback_font, pos + Vector2(-22, -16), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 1))
-
-
-func _draw_ghost() -> void:
-	if tool == Tool.SELECT or not grid.in_bounds(hover_cell):
+	# renders as clipped text jammed against the screen edge.
+	if at.x < 28.0:
 		return
+	_plate_string(at, label, 10, _plane_status_color(p))
 
-	var cells: Array = [hover_cell]
-	var ok := true
 
-	match tool:
-		Tool.TAXIWAY:
-			ok = grid.can_place_taxiway(hover_cell) and money >= COST_TAXIWAY
-		Tool.TERMINAL:
-			ok = grid.can_place_terminal(hover_cell) and money >= COST_TERMINAL_TILE
-		Tool.ROAD:
-			ok = grid.can_place_road(hover_cell) and money >= COST_ROAD_TILE
-		Tool.PARKING:
-			ok = grid.can_place_parking(hover_cell) and money >= COST_PARKING_TILE
-		Tool.GATE_SMALL, Tool.GATE_LARGE:
-			var size := tool_gate_size()
-			cells = grid.gate_cells_for(hover_cell, size)
-			ok = grid.can_place_gate(cells) and money >= COST_GATE_TILE * size
-		Tool.RUNWAY:
-			# Drawn separately as a rotated strip, not as grid cells.
-			_draw_runway_ghost()
-			return
-		Tool.DEMOLISH:
-			var preview := grid.demolish_preview(hover_cell)
-			ok = not preview.is_empty()
-			if ok:
-				cells = preview["cells"]
+func _draw_ghost_label() -> void:
+	if tool != Tool.RUNWAY or not is_dragging or not grid.in_bounds(drag_start):
+		return
+	var pa := grid.cell_to_world(drag_start)
+	var pb := grid.cell_to_world(hover_cell)
+	var ext := grid.runway_extend_target(pa, pb)
+	var span: float = pa.distance_to(pb) / AirportGrid.TILE
+	var total: float = span if ext >= 0 else span + 1.0
+	var cost := int(round(COST_RUNWAY_TILE * total))
+	var at: Vector2 = render3d.world_to_screen(pb, Render3D.H_GHOST) + Vector2(-10, -18)
+	_plate_string(at, "%s — %s" % [length_str(total), money_str(cost)], 12, Color(1, 1, 1))
 
-	var fill := Color(0.4, 1.0, 0.5, 0.3) if ok else Color(1.0, 0.3, 0.3, 0.3)
-	if tool == Tool.DEMOLISH and ok:
-		fill = Color(1.0, 0.65, 0.2, 0.35)
-	for c in cells:
-		if grid.in_bounds(c):
-			draw_rect(_cell_rect(c), fill, true)
 
-	if tool == Tool.RUNWAY and cells.size() > 1:
-		var cost := COST_RUNWAY_TILE * cells.size()
-		var anchor := grid.cell_to_world(cells[0]) + Vector2(-10, -16)
-		draw_string(ThemeDB.fallback_font, anchor, "%s — %s" % [length_str(cells.size()), money_str(cost)], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1, 1, 1))
+# Largest aircraft class a runway of this length can take, as a letter code.
+func _runway_capability(length: float) -> String:
+	for i in range(CLASSES.size() - 1, -1, -1):
+		if length >= CLASSES[i]["min_runway"]:
+			return CLASSES[i]["code"]
+	return "-"
