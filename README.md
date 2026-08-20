@@ -6,7 +6,8 @@ the taxiways you built, reserving tiles so they queue behind each other. Then
 you scale ground operations to match the traffic you sign up for, and cope with
 weather and emergencies you didn't.
 
-Placeholder shapes only (rectangles and triangles), no art assets.
+Rendered isometrically from procedurally-generated `.glb` meshes (flat,
+untextured materials) — no hand-drawn or licensed art assets.
 
 This repo follows [gerp93/KVG_Standards](https://github.com/gerp93/KVG_Standards)
 — see that repo's `game-repos.md` for how those standards apply to game repos,
@@ -254,7 +255,8 @@ deliberately over-commit and are a worst case, not a balance target.
 ## Status
 
 Still a prototype:
-- No sprites, sound, or menus — everything is drawn in code.
+- No sound or menus. Buildings/aircraft render as procedurally-generated 3D
+  meshes now, not sprites, but still flat-material and untextured.
 - Save/load does not preserve in-flight aircraft (by design; the sky restarts
   empty). It does restore your region, layout, economy, facilities and routes.
 - Stands are one aircraft each; no pushback or reverse maneuvers.
